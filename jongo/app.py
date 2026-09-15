@@ -468,6 +468,12 @@ class Jongo:
         self.router.add(Route("/_jongo/live", live, name="_jongo_live", kind="internal"))
         self.router.add(Route(f"{self.static_url}/<path:path>", static, name="static", kind="internal"))
 
+    def admin(self, path: str = "/admin", *, models=None, title: str = "Jongo admin"):
+        """Mount the generated admin site. Sign in with a user that has ``is_admin=True``."""
+        from .admin import Admin
+
+        return Admin(self, path, models=models, title=title)
+
     # -- running ----------------------------------------------------------------------------------------
 
     def check(self) -> None:
