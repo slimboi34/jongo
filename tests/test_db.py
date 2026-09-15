@@ -1223,7 +1223,6 @@ class TestMigrations:
 
         (op,) = db.plan_migrations([Comment])
         assert op.kind == "drop_column" and op.destructive and op.rebuild
-        people.Comment  # the old class is no longer registered
         db.migrate([Comment], allow_destructive=True)
         assert set(columns("comment")) == {"id", "body"}
 
