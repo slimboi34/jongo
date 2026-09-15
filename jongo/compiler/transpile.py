@@ -223,7 +223,12 @@ class FunctionTranspiler:
         sig = [json.dumps(params)]
         if star or kwonly or dstar:
             sig += [json.dumps(star), json.dumps(kwonly), json.dumps(dstar)]
-        return f"$fn({head}, {', '.join(sig)})"
+        result = f"$fn({head}, {', '.join(sig)})"
+        if captured:
+            names = ", ".join(n for n, _ in captured)
+            values = ", ".join(code for _, code in captured)
+            result = f"(({names}) => {result})({values})"
+        return result
 
     # -- statements ----------------------------------------------------------
 
