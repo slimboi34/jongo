@@ -89,7 +89,13 @@ def serve(app, host="127.0.0.1", port=8000, *, migrate=None):
             raise
         log.error("%s\n%s", color("compile error", "31;1"), exc)
 
-    server = ThreadingWSGIServer((host, port), _RequestHandler)
+    try:
+        server = ThreadingWSGIServer((host, port), _RequestHandler)
+    except OSError as exc:
+        if exc.errno in (48, 98):  # EADDRINUSE on macOS / Linux
+            sys.stderr.write(color(f"\n  Port {port} is already in use. Try `--port {port + 1}`.\n", "31"))
+            raise SystemExit(1) from None
+        raise
     server.set_app(app)
     mode = color("dev", "38;5;209") if app.dev else color("production", "32")
     url = f"http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{port}"
