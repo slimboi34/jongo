@@ -104,6 +104,17 @@ class Request:
     # -- basics ------------------------------------------------------------------
 
     @property
+    def user(self):
+        """The logged-in user (loaded from the session on first access), or None."""
+        if self._user is _UNSET:
+            self._user = self.app.load_user(self) if self.app is not None else None
+        return self._user
+
+    @user.setter
+    def user(self, value):
+        self._user = value
+
+    @property
     def args(self) -> QueryDict:
         return self.query
 
