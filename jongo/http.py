@@ -22,6 +22,25 @@ SESSION_COOKIE = "jongo_session"
 _UNSET = object()
 
 
+def parse_cookie_header(header: str) -> dict[str, str]:
+    """Parse a Cookie header leniently.
+
+    ``http.cookies.SimpleCookie`` gives up at the first cookie it considers invalid,
+    and on ``localhost`` every dev server you've ever run shares one cookie jar, so
+    one odd cookie from another app would hide ours.
+    """
+    cookies: dict[str, str] = {}
+    for chunk in header.split(";"):
+        name, sep, value = chunk.strip().partition("=")
+        if not sep or not name:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        cookies.setdefault(name.strip(), urllib.parse.unquote(value))
+    return cookies
+
+
 class QueryDict(dict):
     """``d["tag"]`` gives the last value; ``d.getlist("tag")`` gives all of them."""
 
