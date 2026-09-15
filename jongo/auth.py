@@ -45,7 +45,14 @@ def verify_password(password: str, encoded: str) -> bool:
     return hmac.compare_digest(base64.b64encode(digest).decode(), expected)
 
 
-_DUMMY_HASH = hash_password(secrets.token_urlsafe(12), iterations=ITERATIONS)
+_dummy_hash: str | None = None
+
+
+def _dummy() -> str:
+    global _dummy_hash
+    if _dummy_hash is None:
+        _dummy_hash = hash_password(secrets.token_urlsafe(12))
+    return _dummy_hash
 
 
 class User(db.Model):
