@@ -93,7 +93,7 @@ class User(db.Model):
 def authenticate(username: str, password: str) -> User | None:
     user = User.filter(username=username).first()
     if user is None:
-        verify_password(password, _DUMMY_HASH)  # same work either way, so timing reveals nothing
+        verify_password(password, _dummy())  # same work either way, so timing reveals nothing
         return None
     return user if user.check_password(password) else None
 
