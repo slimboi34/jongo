@@ -7,6 +7,7 @@ from jongo import HTTPError, Jongo, NotFound, Page, ServerError, component, css,
 from jongo.html import *
 
 app = Jongo(__name__, title="Jongo Todos", database="todos.sqlite3")
+app.admin()  # /admin — create an account with `jongo createadmin`
 
 
 # ---- data ------------------------------------------------------------------------
