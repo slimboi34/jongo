@@ -130,9 +130,16 @@ def _snapshot_one(root: Path) -> dict:
 
 
 def run_with_reloader(argv: list[str], root: Path) -> int:
-    """Run ``argv`` in a child process and restart it whenever a .py file under ``root`` changes."""
+    """Run ``argv`` in a child process and restart it whenever a watched .py file changes.
+
+    Watches the project, plus Jongo itself when it's an editable checkout (not in site-packages).
+    """
     env = {**os.environ, "JONGO_RUN_MAIN": "1", "JONGO_DEV": "1"}
-    snapshot = _snapshot(root)
+    roots = [root]
+    jongo_dir = Path(__file__).resolve().parent
+    if "site-packages" not in jongo_dir.parts and not jongo_dir.is_relative_to(root):
+        roots.append(jongo_dir)
+    snapshot = _snapshot(roots)
     while True:
         child = subprocess.Popen(argv, env=env)
         crashed_reported = False
