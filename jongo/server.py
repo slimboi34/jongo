@@ -146,7 +146,7 @@ def run_with_reloader(argv: list[str], root: Path) -> int:
         try:
             while True:
                 time.sleep(0.4)
-                current = _snapshot(root)
+                current = _snapshot(roots)
                 if current != snapshot:
                     changed = sorted(set(current) ^ set(snapshot) | {p for p in current if snapshot.get(p) != current[p]})
                     snapshot = current
