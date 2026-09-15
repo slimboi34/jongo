@@ -158,6 +158,18 @@ def test_rpc_requires_csrf_token(client):
     assert response.status == 403
 
 
+def test_csrf_survives_messy_cookies_from_other_localhost_apps(client):
+    client.get("/")
+    token = client.cookies["jongo_csrf"]
+    messy = f'prefs={{"theme": "dark"}}; other="unterminated; jongo_csrf={token}; x=1'
+    response = client.post(
+        f"/_jongo/rpc/{add_note.id}",
+        json={"args": ["from a messy browser"]},
+        headers={"X-CSRF-Token": token, "Cookie": messy},
+    )
+    assert response.status == 200, response.text
+
+
 def test_login_flow_and_request_user(client):
     from jongo.auth import User
 
