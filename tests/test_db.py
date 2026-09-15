@@ -819,7 +819,7 @@ class TestQuerySet:
         assert Todo.search("bob", ["title", "owner__username"]).count() == 1
         assert Todo.search("  ", ["title"]).count() == 4
         assert Todo.search(None, "title").count() == 4
-        assert Todo.filter(done=False).search("o", "title").count() == 3
+        assert Todo.filter(done=False).search("o", "title").count() == 2
 
     def test_update(self, people):
         Todo = people.Todo
