@@ -93,7 +93,7 @@ class Request:
         self.headers = Headers(environ)
         self.path_params: dict = {}
         self.session: Session = Session()
-        self.user = None
+        self._user = _UNSET
         self.route = None
         self._body: bytes | None = None
         self._form: QueryDict | None = None
