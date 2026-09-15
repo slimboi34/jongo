@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import TYPE_CHECKING, Any, Iterable, Iterator
+from collections.abc import Iterable, Iterator
+from typing import TYPE_CHECKING, Any
 
 from . import connection
 from .fields import DateTime, Field, ForeignKey, ValidationError, utcnow
@@ -53,7 +54,9 @@ class Q:
         for condition in conditions:
             if not isinstance(condition, Q):
                 raise TypeError(f"Positional filter arguments must be Q objects, not {type(condition).__name__}.")
-        self.children: list[Q | tuple[str, Any]] = [*conditions, *lookups.items()]
+        # One-shot iterators (e.g. generators passed to __in) are materialised so they can be compiled twice.
+        items = [(key, list(value) if isinstance(value, Iterator) else value) for key, value in lookups.items()]
+        self.children: list[Q | tuple[str, Any]] = [*conditions, *items]
         self.connector = Q.AND
         self.negated = False
 
@@ -180,7 +183,9 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
         conditions.append(f"{column} IS NULL")
     if not conditions:
         return "0 = 1", []
-    return " OR ".join(conditions), present
+    if len(conditions) == 1:
+        return conditions[0], present
+    return f"({' OR '.join(conditions)})", present
 
 
 class QuerySet:
