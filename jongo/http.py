@@ -19,6 +19,7 @@ CSRF_COOKIE = "jongo_csrf"
 CSRF_HEADER = "X-CSRF-Token"
 CSRF_FIELD = "csrf_token"
 SESSION_COOKIE = "jongo_session"
+_UNSET = object()
 
 
 class QueryDict(dict):
