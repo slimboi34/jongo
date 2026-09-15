@@ -1,0 +1,92 @@
+"""{{name}}: a Jongo app. Run it with `jongo dev`."""
+from jongo import Jongo, component, css, db, global_css, server, state
+from jongo.html import *
+
+app = Jongo(__name__, title="{{name}}", database="db.sqlite3")
+
+
+class Message(db.Model):
+    author = db.Text(max_length=40)
+    body = db.Text(max_length=280)
+    created = db.DateTime(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created"]
+
+
+@server
+def post_message(author: str, body: str) -> dict:
+    return Message.create(author=author.strip() or "anonymous", body=body.strip()).to_dict()
+
+
+global_css({"body": {"margin": 0, "font": "16px/1.6 system-ui, sans-serif", "background": "#faf7f2", "color": "#1f1b16"}})
+
+s = css(
+    page={"max_width": 620, "margin": "0 auto", "padding": "48px 20px"},
+    card={"background": "white", "border": "1px solid #eadfce", "border_radius": 16, "padding": 20, "margin_top": 20},
+    row={"display": "flex", "gap": 8, "flex_wrap": "wrap"},
+    field={"flex": 1, "min_width": 140, "padding": "10px 12px", "border": "1px solid #ddd2c2", "border_radius": 10},
+    button={"padding": "10px 16px", "border": 0, "border_radius": 10, "background": "#e4572e", "color": "white",
+            "font_weight": 600, "cursor": "pointer"},
+    muted={"color": "#8b8174", "font_size": 14},
+)
+
+
+@app.layout
+@component
+def Layout(children):
+    return div(nav(a("Home", href="/"), " · ", a("About", href="/about")), children, class_=s.page)
+
+
+@component
+def Counter(start=0):
+    count = state(start)
+    return div(
+        h2(f"You clicked {count.value} time{'s' if count.value != 1 else ''}"),
+        button("Click me", on_click=lambda e: count.update(lambda n: n + 1), class_=s.button),
+        class_=s.card,
+    )
+
+
+@component
+def Guestbook(messages):
+    items = state(messages)
+    author = state("")
+    body = state("")
+
+    async def send(event):
+        if not body.value.strip():
+            return
+        message = await post_message(author.value, body.value)
+        items.value = [message] + items.value
+        body.value = ""
+
+    return div(
+        h2("Guestbook"),
+        form(
+            div(
+                input_(placeholder="Your name", value=author.value, on_input=lambda e: author.set(e.target.value), class_=s.field),
+                input_(placeholder="Say hi", value=body.value, on_input=lambda e: body.set(e.target.value), class_=s.field),
+                button("Post", class_=s.button),
+                class_=s.row,
+            ),
+            on_submit=send,
+        ),
+        ul([li(strong(m["author"]), ": ", m["body"], key=m["id"]) for m in items.value]),
+        class_=s.card,
+    )
+
+
+@app.page("/")
+def home():
+    return div(
+        h1("Welcome to {{name}}"),
+        p("Edit app.py and save: the page reloads by itself.", class_=s.muted),
+        Counter(),
+        Guestbook(messages=Message.all()[:20]),
+    )
+
+
+@app.page("/about", title="About · {{name}}")
+def about():
+    return div(h1("About"), p("Built with Jongo: one language for the whole stack."))
