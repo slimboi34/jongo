@@ -972,7 +972,7 @@ class TestRelations:
             username = db.Text()
 
         assert db.get_model("User") is User
-        db.migrate()
+        db.migrate(allow_destructive=True)
         user = User.create(username="new")
         app.Todo.create(title="t", owner_id=user.pk)
         assert titles(user.todos) == ["t"]
