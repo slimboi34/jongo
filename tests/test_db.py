@@ -1016,9 +1016,8 @@ class TestMigrations:
         assert 'REFERENCES "note" ("id") ON DELETE CASCADE' in op.sql[0]
         assert 'CREATE INDEX "ix_note_text" ON "note" ("text")' in op.sql
         results = db.migrate(dry_run=True)
-        assert results == [(op, False) for op in results] and "note" not in {
-            r["name"] for r in db.query("SELECT name FROM sqlite_master")
-        }
+        assert [(result.kind, applied) for result, applied in results] == [("create_table", False)]
+        assert "note" not in {row["name"] for row in db.query("SELECT name FROM sqlite_master")}
 
     def test_add_columns(self):
         class Post(db.Model):
