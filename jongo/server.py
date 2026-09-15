@@ -108,7 +108,14 @@ def serve(app, host="127.0.0.1", port=8000, *, migrate=None):
         server.server_close()
 
 
-def _snapshot(root: Path) -> dict:
+def _snapshot(roots) -> dict:
+    mtimes = {}
+    for root in roots:
+        mtimes.update(_snapshot_one(root))
+    return mtimes
+
+
+def _snapshot_one(root: Path) -> dict:
     mtimes = {}
     for directory, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
