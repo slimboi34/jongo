@@ -44,6 +44,14 @@ class HTTPError(JongoError):
         super().__init__(f"{status} {self.message}")
 
 
+class ServerError(JongoError):
+    """Raised in browser code when a @server function call fails.
+
+    Has ``.type`` (the server exception's class name), ``.status`` and ``.errors``
+    (field errors from a ValidationError, if any).
+    """
+
+
 class NotFound(HTTPError):
     def __init__(self, message: str | None = None):
         super().__init__(404, message)
