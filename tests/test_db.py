@@ -1213,7 +1213,6 @@ class TestMigrations:
 
         (op,) = db.plan_migrations()
         assert op.kind == "rebuild_table"  # empty table: safe to rebuild
-        Pet.objects  # noqa: B018 - still usable
         db.execute("INSERT INTO pet (name) VALUES ('rex')")
         with pytest.raises(db.MigrationError, match="already has rows"):
             db.plan_migrations()
