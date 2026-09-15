@@ -478,6 +478,14 @@ class Model(metaclass=ModelMeta):
         return cls._queryset().exclude(*conditions, **lookups)
 
     @classmethod
+    def order_by(cls, *fields: str) -> QuerySet:
+        return cls._queryset().order_by(*fields)
+
+    @classmethod
+    def search(cls, term: str | None, fields: Any) -> QuerySet:
+        return cls._queryset().search(term, fields)
+
+    @classmethod
     def get(cls, *conditions: Q, **lookups: Any) -> Model:
         return cls._queryset().get(*conditions, **lookups)
 
