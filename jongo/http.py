@@ -212,12 +212,7 @@ class Request:
     @property
     def cookies(self) -> dict:
         if self._cookies is None:
-            jar = http.cookies.SimpleCookie()
-            try:
-                jar.load(self.headers.get("cookie") or "")
-            except http.cookies.CookieError:
-                pass
-            self._cookies = {k: m.value for k, m in jar.items()}
+            self._cookies = parse_cookie_header(self.headers.get("cookie") or "")
         return self._cookies
 
     @property
