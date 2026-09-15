@@ -155,8 +155,20 @@ class FunctionTranspiler:
     def function(self, node, name=None) -> str:
         args = node.args
         positional = args.posonlyargs + args.args
-        defaults = [self.expr(d) for d in args.defaults]
-        kw_defaults = [None if d is None else self.expr(d) for d in args.kw_defaults]
+        # Python evaluates defaults once, where the function is defined. Non-literal
+        # defaults are captured by a wrapping arrow so `lambda i=i: ...` works in JS.
+        captured: list[tuple[str, str]] = []
+
+        def default_js(default):
+            code = self.expr(default)
+            if isinstance(default, ast.Constant):
+                return code
+            name = f"$d{len(captured)}"
+            captured.append((name, code))
+            return name
+
+        defaults = [default_js(d) for d in args.defaults]
+        kw_defaults = [None if d is None else default_js(d) for d in args.kw_defaults]
 
         bindings, block_for = analyse_function(node)
         if bindings.globals:
