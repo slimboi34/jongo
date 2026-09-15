@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import date, datetime, time, timezone
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .models import Model
@@ -213,32 +213,41 @@ class Text(Field):
         return value if isinstance(value, str) else str(value)
 
 
+def _to_int(value: Any) -> Any:
+    """Best-effort int conversion for query values; unconvertible values pass through."""
+    if value is None or isinstance(value, int):
+        return None if value is None else int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
 class Int(Field):
     sql_type = "INTEGER"
     kind = "int"
 
     def to_db(self, value: Any) -> Any:
-        if value is None or isinstance(value, int):
-            return None if value is None else int(value)
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return value
+        return _to_int(value)
 
     def parse(self, value: Any) -> Any:
         if value is None or _is_blank_string(value):
             return None
-        if isinstance(value, bool):
-            return int(value)
         if isinstance(value, int):
-            return value
+            return int(value)
+        if isinstance(value, str):
+            value = value.strip()
+            try:
+                return int(value)
+            except ValueError:
+                pass
         try:
-            number = float(value.strip()) if isinstance(value, str) else float(value)
+            number = float(value)
         except (TypeError, ValueError):
-            self.fail("Enter a whole number.")
+            number = math.nan
         if not math.isfinite(number) or not number.is_integer():
             self.fail("Enter a whole number.")
-        return int(value) if isinstance(value, str) and value.strip().lstrip("+-").isdigit() else int(number)
+        return int(number)
 
 
 class Float(Field):
@@ -334,8 +343,10 @@ class DateTime(Field):
         return value
 
     def to_python(self, value: Any) -> Any:
-        if value is None or value == "" or isinstance(value, datetime):
-            return value or None
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            return value
         try:
             return _parse_datetime_string(str(value))
         except ValueError:
@@ -370,8 +381,10 @@ class Date(Field):
         return value
 
     def to_python(self, value: Any) -> Any:
-        if value is None or value == "" or isinstance(value, date):
-            return value or None
+        if value is None or value == "":
+            return None
+        if isinstance(value, date):
+            return value
         try:
             return date.fromisoformat(str(value)[:10])
         except ValueError:
@@ -500,7 +513,7 @@ class ForeignKey(Field):
     def to_db(self, value: Any) -> Any:
         if hasattr(value, "_meta"):
             return value.pk
-        return Int.to_db(self, value)
+        return _to_int(value)
 
     def parse(self, value: Any) -> Any:
         if value is None or _is_blank_string(value):
@@ -542,5 +555,4 @@ __all__ = [
     "JSON",
     "ForeignKey",
     "ValidationError",
-    "Callable",
 ]

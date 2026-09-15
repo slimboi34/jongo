@@ -5,3 +5,4 @@ __pycache__/
 .jongo/
 *.egg-info/
 .pytest_cache/
+*.sqlite3-*
