@@ -9,12 +9,31 @@ description = "A full-stack Python web framework: routes, server code and reacti
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "Joshua Harty" }]
+keywords = ["web", "framework", "fullstack", "frontend", "orm", "wsgi", "transpiler", "ssr"]
 dependencies = []
 classifiers = [
-    "Framework :: Jongo",
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
     "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://github.com/slimboi34/jongo"
+Repository = "https://github.com/slimboi34/jongo"
+Issues = "https://github.com/slimboi34/jongo/issues"
 
 [project.scripts]
 jongo = "jongo.cli:main"
