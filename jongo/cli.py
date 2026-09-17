@@ -177,7 +177,7 @@ def cmd_build(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="jongo", description="Full-stack Python web framework")
-    parser.add_argument("--version", action="version", version="jongo 0.1.0")
+    parser.add_argument("--version", action="version", version="jongo 0.2.0")
     sub = parser.add_subparsers(dest="command", metavar="command")
 
     def add(name, fn, help_text, app_arg=True):

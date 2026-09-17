@@ -97,6 +97,12 @@ function $eq(a, b) {
     return ka.length === Object.keys(b).length && ka.every((k) => $hasOwn(b, k) && $eq(a[k], b[k]));
   }
   if (a instanceof Set && b instanceof Set) return a.size === b.size && [...a].every((x) => b.has(x));
+  // Python treats booleans as ints: True == 1, False == 0, and 1 == 1.0.
+  if (typeof a === "boolean" || typeof b === "boolean") {
+    const na = typeof a === "boolean" ? +a : a;
+    const nb = typeof b === "boolean" ? +b : b;
+    if (typeof na === "number" && typeof nb === "number") return na === nb;
+  }
   return false;
 }
 
@@ -163,6 +169,23 @@ function $bor(a, b) {
   if ($isPlain(a) && $isPlain(b)) return { ...a, ...b };
   if (a instanceof Set && b instanceof Set) return new Set([...a, ...b]);
   return a | b;
+}
+
+function $sub(a, b) {
+  if (a instanceof Set && b instanceof Set) return new Set([...a].filter((x) => !b.has(x)));
+  return a - b;
+}
+
+function $band(a, b) {
+  if (a instanceof Set && b instanceof Set) return new Set([...a].filter((x) => b.has(x)));
+  return a & b;
+}
+
+function $bxor(a, b) {
+  if (a instanceof Set && b instanceof Set) {
+    return new Set([...a].filter((x) => !b.has(x)).concat([...b].filter((x) => !a.has(x))));
+  }
+  return a ^ b;
 }
 
 // ---- iteration, indexing, attributes ------------------------------------------
@@ -355,7 +378,7 @@ function $fmt(x, spec) {
   if (!spec) return $str(x);
   const m = /^(?:(.)?([<>^=]))?([+\- ])?(#)?(0)?(\d+)?([,_])?(?:\.(\d+))?([bcdeEfFgGnosxX%])?$/.exec(spec);
   if (!m) throw $b.ValueError(`Invalid format specifier '${spec}'`);
-  let [, fill = " ", align, sign, , zero, width, group, prec, type] = m;
+  let [, fill = " ", align, sign, alt, zero, width, group, prec, type] = m;
   const p = prec === undefined ? undefined : +prec;
   let body;
   let signStr = "";
@@ -374,6 +397,10 @@ function $fmt(x, spec) {
       default: body = p === undefined ? String(n) : String(+n.toPrecision(p || 1));
     }
     if (type === "E") body = body.toUpperCase();
+    if (alt) {
+      const prefix = { x: "0x", X: "0X", o: "0o", b: "0b" }[type];
+      if (prefix) body = prefix + body;
+    }
     if (group) body = body.replace(/^(\d+)/, (d) => d.replace(/\B(?=(\d{3})+(?!\d))/g, group));
     if (type === "%") body += "%";
     signStr = x < 0 ? "-" : sign === "+" ? "+" : sign === " " ? " " : "";
@@ -424,7 +451,31 @@ function $formatBraces(s, args, kw) {
     let value;
     if (field === "") value = args[auto++];
     else if (/^\d+$/.test(field)) value = args[+field];
-    else value = field.split(".").reduce((o, part) => (o === kw ? kw[part] : $ga(o, part)), kw);
+    else {
+      // Resolve a field path with attribute (.x) and subscript ([k]) access, e.g. {x[0].y}
+      // or {0[1]} (a positional arg, then a subscript).
+      const tokens = field.match(/[^.[\]]+|\[[^\]]*\]/g) || [];
+      let cur;
+      let first = true;
+      for (const tok of tokens) {
+        if (first) {
+          first = false;
+          cur = /^\d+$/.test(tok) ? args[+tok] : kw[tok];
+          continue;
+        }
+        if (tok[0] === "[") {
+          let key = tok.slice(1, -1);
+          if (/^-?\d+$/.test(key)) {
+            key = +key;
+            if (Array.isArray(cur) && key < 0) key += cur.length;
+          }
+          cur = cur[key];
+        } else {
+          cur = $ga(cur, tok);
+        }
+      }
+      value = cur;
+    }
     if (conv === "r") value = $repr(value);
     return $fmt(value, spec);
   });
@@ -480,8 +531,29 @@ function $round(x, n) {
     const r = Math.round(x);
     return Math.abs(x % 1) === 0.5 && r % 2 !== 0 ? r - 1 : r; // banker's rounding
   }
-  const m = 10 ** n;
-  return Math.round(x * m) / m;
+  if (!Number.isFinite(x)) return x;
+  if (n < 0) {
+    const m = 10 ** -n;
+    return $round(x / m, 0) * m;
+  }
+  // Round the double's exact decimal expansion, half-to-even at n places, so results
+  // match CPython even where x*10**n would cross .5 in binary (e.g. round(2.675, 2) == 2.67).
+  const neg = x < 0;
+  const digits = Math.abs(x).toFixed(Math.min(n + 18, 100));
+  const dot = digits.indexOf(".");
+  const cut = dot + 1 + n;
+  let keep = digits.slice(0, cut).replace(".", "");
+  const rest = digits.slice(cut);
+  const first = rest.charCodeAt(0) - 48;
+  let roundUp = false;
+  if (first > 5) roundUp = true;
+  else if (first === 5) {
+    if (/[1-9]/.test(rest.slice(1))) roundUp = true;
+    else roundUp = (keep.charCodeAt(keep.length - 1) - 48) % 2 === 1; // exact tie → to even
+  }
+  const intval = BigInt(keep || "0") + (roundUp ? 1n : 0n);
+  const result = Number(intval) / 10 ** n;
+  return neg ? -result : result;
 }
 
 Object.assign($b, {
@@ -566,7 +638,23 @@ Object.assign($b, {
   chr: (n) => String.fromCodePoint(n),
   ord: (s) => s.codePointAt(0),
   divmod: (a, b) => [$floordiv(a, b), $mod(a, b)],
-  pow: (a, b) => a ** b,
+  pow: (a, b, m) => {
+    if (m === undefined || m === null) return a ** b;
+    if (b < 0) throw $b.ValueError("pow() 2nd argument cannot be negative when 3rd argument specified");
+    let base = ((a % m) + m) % m;
+    let exp = b;
+    let result = 1 % m;
+    while (exp > 0) {
+      if (exp % 2 === 1) result = (result * base) % m;
+      exp = Math.floor(exp / 2);
+      base = (base * base) % m;
+    }
+    return result;
+  },
+  bin: (n) => (n < 0 ? "-0b" + (-n).toString(2) : "0b" + n.toString(2)),
+  oct: (n) => (n < 0 ? "-0o" + (-n).toString(8) : "0o" + n.toString(8)),
+  hex: (n) => (n < 0 ? "-0x" + (-n).toString(16) : "0x" + n.toString(16)),
+  frozenset: (it) => new Set(it === undefined ? [] : $iter(it)),
   hasattr: (o, name) => o !== null && o !== undefined && (name in Object(o) || $camel(name) in Object(o)),
   getattr(o, name, dflt) {
     const v = $ga(o, name);
@@ -618,6 +706,24 @@ const $STR = {
     if (max >= 0 && parts.length > max + 1) parts = [...parts.slice(0, max), parts.slice(max).join(sep)];
     return parts;
   },
+  rsplit(s, [sep = null, max = -1], kw) {
+    max = kw.maxsplit !== undefined ? kw.maxsplit : max;
+    if (sep === null) return $STR.split(s, [null, max], {});
+    if (max < 0) return s.split(sep);
+    const parts = s.split(sep);
+    if (parts.length <= max + 1) return parts;
+    return [parts.slice(0, parts.length - max).join(sep), ...parts.slice(parts.length - max)];
+  },
+  partition(s, [sep]) {
+    const i = s.indexOf(sep);
+    return i < 0 ? [s, "", ""] : [s.slice(0, i), sep, s.slice(i + sep.length)];
+  },
+  rpartition(s, [sep]) {
+    const i = s.lastIndexOf(sep);
+    return i < 0 ? ["", "", s] : [s.slice(0, i), sep, s.slice(i + sep.length)];
+  },
+  removeprefix: (s, [p]) => (p && s.startsWith(p) ? s.slice(p.length) : s),
+  removesuffix: (s, [p]) => (p && s.endsWith(p) ? s.slice(0, s.length - p.length) : s),
   splitlines: (s) => (s ? s.replace(/\r?\n$/, "").split(/\r?\n/) : []),
   join(s, [it]) {
     return [...$iter(it)]
@@ -641,9 +747,11 @@ const $STR = {
     if (i < 0) throw $b.ValueError("substring not found");
     return i;
   },
-  count: (s, [x]) => s.split(x).length - 1,
+  count: (s, [x]) => (x === "" ? s.length + 1 : s.split(x).length - 1),
   title: (s) => s.replace(/[A-Za-z]+/g, (w) => w[0].toUpperCase() + w.slice(1).toLowerCase()),
   capitalize: (s) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : s),
+  swapcase: (s) => s.replace(/\p{L}/gu, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase())),
+  casefold: (s) => s.toLowerCase(),
   isdigit: (s) => /^\d+$/.test(s),
   isnumeric: (s) => /^\d+$/.test(s),
   isalpha: (s) => /^\p{L}+$/u.test(s),

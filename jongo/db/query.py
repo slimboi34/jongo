@@ -176,16 +176,40 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
         raise TypeError(f'The "in" lookup expects a list, tuple, set or QuerySet, not {type(value).__name__}.')
     values = [field.to_db(item) for item in value]
     present = [item for item in values if item is not None]
-    conditions = []
+    has_null = len(present) != len(values)
+    conditions: list[str] = []
+    params: list = []
     if present:
-        conditions.append(f"{column} IN ({', '.join('?' * len(present))})")
-    if len(present) != len(values):
+        literals = [_sqlite_literal(v) for v in present]
+        if all(lit is not None for lit in literals):
+            # Inline SQL-safe literals so a huge __in list can't exceed SQLite's bound-variable
+            # limit (which counts total "?", so OR-chunking bound params would not help).
+            conditions.append(f"{column} IN ({', '.join(literals)})")
+        else:
+            conditions.append(f"{column} IN ({', '.join('?' * len(present))})")
+            params = present
+    if has_null:
         conditions.append(f"{column} IS NULL")
     if not conditions:
         return "0 = 1", []
     if len(conditions) == 1:
-        return conditions[0], present
-    return f"({' OR '.join(conditions)})", present
+        return conditions[0], params
+    return f"({' OR '.join(conditions)})", params
+
+
+def _sqlite_literal(value):
+    """A safe inline SQL literal for common types, or None if it must be a bound parameter."""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value) if value == value and value not in (float("inf"), float("-inf")) else None
+    if isinstance(value, str):
+        if "\x00" in value:
+            return None
+        return "'" + value.replace("'", "''") + "'"  # SQLite escapes a quote by doubling it
+    return None
 
 
 class QuerySet:

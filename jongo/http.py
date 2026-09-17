@@ -235,24 +235,38 @@ class Request:
         return self._cookies
 
     @property
+    def _signer(self):
+        return getattr(self.app, "signer", None)
+
+    @property
     def csrf_token(self) -> str:
         if self._csrf_token is None:
             existing = self.cookies.get(CSRF_COOKIE)
-            self._csrf_token = existing if existing and len(existing) >= 32 else secrets.token_urlsafe(32)
+            signer = self._signer
+            if signer is not None:
+                # Sign the token with the app secret so a planted/forged cookie is rejected.
+                self._csrf_token = existing if existing and signer.loads(existing) is not None \
+                    else signer.dumps(secrets.token_urlsafe(16))
+            else:
+                self._csrf_token = existing if existing and len(existing) >= 32 else secrets.token_urlsafe(32)
         return self._csrf_token
 
     def csrf_ok(self) -> bool:
         cookie = self.cookies.get(CSRF_COOKIE)
         if not cookie:
             return False
+        signer = self._signer
+        if signer is not None and signer.loads(cookie) is None:
+            return False  # the token wasn't minted (signed) by this app
         sent = self.headers.get(CSRF_HEADER)
         if sent is None and self.content_type in ("application/x-www-form-urlencoded", "multipart/form-data"):
             sent = self.form.get(CSRF_FIELD)
         if not sent or not hmac.compare_digest(str(sent), cookie):
             return False
         origin = self.headers.get("origin")
-        if origin and origin != "null":
-            return urllib.parse.urlsplit(origin).netloc == self.host
+        if origin is not None:
+            # A present Origin must match; "null" (sandboxed iframes, some clients) is untrusted.
+            return origin != "null" and urllib.parse.urlsplit(origin).netloc == self.host
         return True
 
     def __repr__(self):
@@ -269,6 +283,8 @@ class Response:
         self.body = body
 
     def set_cookie(self, name, value, *, max_age=None, path="/", httponly=True, samesite="Lax", secure=False):
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in str(value)):
+            raise ValueError(f"cookie {name!r} value contains control characters; encode it first")
         morsel = http.cookies.SimpleCookie()
         morsel[name] = value
         cookie = morsel[name]

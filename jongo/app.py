@@ -14,6 +14,7 @@ import threading
 import time
 import traceback
 import typing
+import urllib.parse
 from pathlib import Path
 
 from . import vdom
@@ -198,7 +199,7 @@ class Jongo:
             raise HTTPError(403, "The form expired (CSRF check failed). Reload the page and try again.")
         if options.get("login_required") and not request.user:
             if route.kind == "page":
-                return redirect(f"{self.login_url}?next={_html.escape(request.full_path)}", 302)
+                return redirect(f"{self.login_url}?next={urllib.parse.quote(request.full_path, safe='')}", 302)
             raise HTTPError(401, "Please log in first")
         if options.get("admin_required") and not getattr(request.user, "is_admin", False):
             raise HTTPError(403, "Admins only")
@@ -325,9 +326,18 @@ class Jongo:
         token = request.cookies.get(SESSION_COOKIE)
         data = self.signer.loads(token, self.session_max_age) if token else None
         request.session = Session(data if isinstance(data, dict) else {})
+        # Snapshot the loaded state so in-place nested mutation (session["x"].append(...))
+        # is detected in _finish even though it doesn't set Session.modified.
+        request._session_loaded = json.dumps(dict(request.session), sort_keys=True, default=str)
+
+    def _session_changed(self, request: Request) -> bool:
+        if request.session.modified:
+            return True
+        current = json.dumps(dict(request.session), sort_keys=True, default=str)
+        return current != getattr(request, "_session_loaded", "{}")
 
     def _finish(self, request: Request, response: Response):
-        if request.session.modified:
+        if self._session_changed(request):
             if request.session:
                 value = self.signer.dumps(dict(request.session))
                 if len(value) > 3800:

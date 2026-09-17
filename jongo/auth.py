@@ -37,11 +37,14 @@ def hash_password(password: str, *, iterations: int | None = None) -> str:
 def verify_password(password: str, encoded: str) -> bool:
     try:
         algorithm, iterations, salt, expected = encoded.split("$", 3)
-    except (ValueError, AttributeError):
-        return False
-    if algorithm != ALGORITHM:
-        return False
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), int(iterations))
+        if algorithm != ALGORITHM:
+            return False
+        rounds = int(iterations)
+        if rounds < 1:
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), rounds)
+    except (ValueError, AttributeError, TypeError):
+        return False  # a corrupt/tampered stored hash fails auth cleanly, never 500s
     return hmac.compare_digest(base64.b64encode(digest).decode(), expected)
 
 

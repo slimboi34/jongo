@@ -27,8 +27,8 @@ JS_RESERVED = frozenset(
 )
 
 BUILTINS = frozenset(
-    """len str int float bool list dict set tuple range enumerate zip sorted reversed sum min max abs
-    round any all map filter print isinstance repr chr ord divmod pow hasattr getattr setattr callable
+    """len str int float bool list dict set frozenset tuple range enumerate zip sorted reversed sum min max abs
+    round any all map filter print isinstance repr chr ord divmod pow bin oct hex hasattr getattr setattr callable
     Exception BaseException ValueError TypeError KeyError IndexError AttributeError RuntimeError
     AssertionError ZeroDivisionError NotImplementedError""".split()
 )
@@ -569,13 +569,19 @@ class FunctionTranspiler:
             if _is_num(left_node) and _is_num(right_node):
                 return f"({left} * {right})"
             return f"$mul({left}, {right})"
+        if kind is ast.Sub:
+            if _is_num(left_node) and _is_num(right_node):
+                return f"({left} - {right})"
+            return f"$sub({left}, {right})"  # set difference when both are sets
         simple = {
-            ast.Sub: "-", ast.Div: "/", ast.Pow: "**", ast.LShift: "<<",
-            ast.RShift: ">>", ast.BitAnd: "&", ast.BitXor: "^",
+            ast.Div: "/", ast.Pow: "**", ast.LShift: "<<", ast.RShift: ">>",
         }
         if kind in simple:
             return f"({left} {simple[kind]} {right})"
-        helpers = {ast.FloorDiv: "$floordiv", ast.Mod: "$mod", ast.BitOr: "$bor"}
+        helpers = {
+            ast.FloorDiv: "$floordiv", ast.Mod: "$mod", ast.BitOr: "$bor",
+            ast.BitAnd: "$band", ast.BitXor: "$bxor",  # set intersection / symmetric difference
+        }
         if kind in helpers:
             return f"{helpers[kind]}({left}, {right})"
         self.error(left_node or right_node, f"operator {kind.__name__} isn't supported in browser code")
@@ -614,8 +620,10 @@ class FunctionTranspiler:
             if _is_none(right_node) or _is_none(left_node):
                 other = left if _is_none(right_node) else right
                 return f"({other} {'==' if positive else '!='} null)"
-            if kind in (ast.Is, ast.IsNot) or _is_literal(left_node) or _is_literal(right_node):
+            if kind in (ast.Is, ast.IsNot):
                 return f"({left} {'===' if positive else '!=='} {right})"
+            # Always route == / != through $eq: JS === is wrong for Python value equality
+            # (True == 1, 1 == 1.0, list/dict/set structural equality).
             return f"$eq({left}, {right})" if positive else f"!$eq({left}, {right})"
         if kind is ast.In:
             return f"$in({left}, {right})"

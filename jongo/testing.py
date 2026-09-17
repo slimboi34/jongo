@@ -56,7 +56,10 @@ class TestClient:
             body = urllib.parse.urlencode(data, doseq=True).encode()
             content_type = "application/x-www-form-urlencoded"
         if method not in ("GET", "HEAD", "OPTIONS"):
-            token = self.cookies.setdefault(CSRF_COOKIE, secrets.token_urlsafe(32))
+            token = self.cookies.get(CSRF_COOKIE)
+            if not token or self.app.signer.loads(token) is None:  # mint a signed token like a browser gets
+                token = self.app.signer.dumps(secrets.token_urlsafe(16))
+                self.cookies[CSRF_COOKIE] = token
             headers.setdefault("X-CSRF-Token", token)
 
         environ = {

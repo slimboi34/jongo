@@ -58,6 +58,15 @@ class Route:
         pattern.append("/?$" if path != "/" else "$")
         self.regex = re.compile("".join(pattern))
         self.accepts = set(inspect.signature(handler).parameters)
+        # Specificity for match ordering: catch-all (path:) last, then fewer params,
+        # then more static characters — so a literal /o/special beats a dynamic /o/<thing>.
+        self._npathconv = sum(1 for m in _PARAM.finditer(path) if m.group(1) == "path")
+        self._nparams = len(self.params)
+        self._nstatic = len(re.sub(r"<[^>]+>", "", path))
+
+    @property
+    def specificity(self):
+        return (self._npathconv, self._nparams, -self._nstatic)
 
     def match(self, path: str) -> dict | None:
         m = self.regex.match(path)
@@ -87,14 +96,17 @@ class Route:
 class Router:
     def __init__(self):
         self.routes: list[Route] = []
+        self._match_order: list[Route] = []
 
     def add(self, route: Route) -> Route:
         self.routes.append(route)
+        # Try more-specific routes first; registration order (self.routes) is kept for url_for.
+        self._match_order = sorted(self.routes, key=lambda r: r.specificity)
         return route
 
     def match(self, method: str, path: str) -> tuple[Route, dict]:
         allowed = set()
-        for route in self.routes:
+        for route in self._match_order:
             params = route.match(path)
             if params is None:
                 continue

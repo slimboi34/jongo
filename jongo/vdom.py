@@ -14,6 +14,7 @@ import decimal
 import functools
 import html as _html
 import inspect
+import math
 import re
 import uuid
 
@@ -21,6 +22,21 @@ from .errors import JongoError
 
 VOID_TAGS = frozenset("area base br col embed hr img input link meta source track wbr".split())
 RAW_TEXT_TAGS = frozenset(("script", "style"))
+# Tag and attribute names are written into markup unescaped, so they must be validated
+# (a crafted name would otherwise inject attributes/handlers). URL attributes get their
+# scheme checked so attacker-supplied values can't smuggle in javascript:.
+_VALID_TAG = re.compile(r"^[A-Za-z][A-Za-z0-9-]*$")
+_VALID_ATTR = re.compile(r"^[A-Za-z_:][-A-Za-z0-9_:.]*$")
+_URL_ATTRS = frozenset(("href", "src", "action", "formaction", "xlink:href", "poster", "cite", "data"))
+
+
+def _is_dangerous_url(value) -> bool:
+    s = str(value)
+    if ":" not in s:
+        return False
+    # Browsers ignore control chars/whitespace inside the scheme, so strip them before checking.
+    scheme = re.sub(r"[\x00-\x20]", "", s.split(":", 1)[0]).lower()
+    return scheme in ("javascript", "vbscript")
 UNITLESS_CSS = frozenset(
     "opacity z-index flex flex-grow flex-shrink font-weight line-height order zoom scale "
     "grid-row grid-column aspect-ratio".split()
@@ -347,6 +363,8 @@ def _render(node, out, select_value) -> bool:
         return _render(render_component(node.type, node.props, node.children), out, select_value)
 
     tag = node.type
+    if not _VALID_TAG.match(tag):
+        raise JongoError(f"invalid tag name {tag!r}: tag names must be letters, digits and hyphens")
     props = node.props
     if tag == "option" and select_value is not None and "selected" not in props:
         props = {**props, "selected": str(props.get("value")) == str(select_value)}
@@ -399,6 +417,10 @@ def _render_attrs(tag, props, out):
             value = style_text(value)
             if not value:
                 continue
+        if not _VALID_ATTR.match(name):
+            continue  # drop names that would inject markup/handlers
+        if name in _URL_ATTRS and value is not True and _is_dangerous_url(value):
+            continue  # neutralize javascript:/vbscript: URLs
         if value is True:
             out.append(" " + name)
         else:
@@ -431,14 +453,33 @@ class AttrDict(dict):
             raise AttributeError(name) from None
 
 
+# The wire wraps a VNode embedded in data as the single-key dict {"$v": ...}. To keep
+# ordinary data that happens to use that key from being revived into live UT (a stored-XSS
+# vector), any user key in the "$v" / "$$v" / ... family is escaped with one extra "$" on
+# the way out and stripped back on the way in. Mirrored in compiler/dom.js ($escKey/$unescKey).
+_SENTINEL_KEY = re.compile(r"^\$+v$")
+
+
+def _escape_key(k: str) -> str:
+    return "$" + k if _SENTINEL_KEY.match(k) else k
+
+
+def _unescape_key(k: str) -> str:
+    return k[1:] if k.startswith("$$") and _SENTINEL_KEY.match(k) else k
+
+
 def to_json_data(value, where: str = "value"):
     """Convert ``value`` to plain JSON data the browser can receive."""
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None  # NaN/Infinity aren't valid JSON
+    if isinstance(value, (int, str)):
         return value
     if isinstance(value, VNode):
         return {"$v": serialize(value)}
     if isinstance(value, dict):
-        return {str(k): to_json_data(v, f"{where}[{k!r}]") for k, v in value.items()}
+        return {_escape_key(str(k)): to_json_data(v, f"{where}[{k!r}]") for k, v in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
         return [to_json_data(v, f"{where}[{i}]") for i, v in enumerate(value)]
     if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
@@ -509,7 +550,7 @@ def revive(value):
     if isinstance(value, dict):
         if len(value) == 1 and "$v" in value:
             return build(value["$v"])
-        return AttrDict({k: revive(v) for k, v in value.items()})
+        return AttrDict({_unescape_key(k): revive(v) for k, v in value.items()})
     if isinstance(value, list):
         return [revive(v) for v in value]
     return value

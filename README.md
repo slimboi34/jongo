@@ -301,10 +301,12 @@ cd examples/todo && ../../.venv/bin/jongo dev
 
 ## Status
 
-Version 0.1, which is young. Known limits:
+Version 0.2 — 0.1 hardened by a stress audit (see `CHANGELOG.md`). Known limits:
 - SQLite only.
 - No WebSockets yet.
 - No classes in browser code.
 - Components re-render their subtree without memoisation.
+- Integers beyond 2⁵³ lose precision in browser code (JavaScript numbers are float64); do big-integer work in a `@server` function.
+- `x__ne=v` / `.exclude(field=v)` also match rows where the column is `NULL` (matching Python's `None != v`, not SQL's three-valued logic).
 
 Bug reports and ideas are welcome.

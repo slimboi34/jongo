@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from datetime import date, datetime, time, timezone
@@ -120,7 +121,9 @@ class Field:
     def get_default(self) -> Any:
         if not self.has_default():
             return None
-        return self.default() if callable(self.default) else self.default
+        if callable(self.default):
+            return self.default()
+        return copy.deepcopy(self.default)  # a non-callable list/dict default must not be shared across rows
 
     def choice_label(self, value: Any) -> str:
         """Human label for ``value`` according to ``choices`` (or ``str(value)``)."""
@@ -213,10 +216,22 @@ class Text(Field):
         return value if isinstance(value, str) else str(value)
 
 
+def _to_utc(dt: datetime) -> datetime:
+    """A naive datetime is assumed to be UTC; an aware one is converted to UTC."""
+    return dt.astimezone(timezone.utc) if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def _to_int(value: Any) -> Any:
     """Best-effort int conversion for query values; unconvertible values pass through."""
-    if value is None or isinstance(value, int):
-        return None if value is None else int(value)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        # Keep a non-integral float as-is so filter(v=5.9) doesn't match rows where v == 5.
+        return int(value) if value.is_integer() else value
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -255,10 +270,15 @@ class Float(Field):
     kind = "float"
 
     def to_db(self, value: Any) -> Any:
+        if value is None:
+            return None
         try:
-            return None if value is None else float(value)
+            number = float(value)
         except (TypeError, ValueError):
             return value
+        if not math.isfinite(number):  # SQLite stores NaN as NULL and can't round-trip inf reliably
+            self.fail("Enter a finite number (not NaN or infinity).")
+        return number
 
     def to_python(self, value: Any) -> Any:
         return None if value is None else float(value)
@@ -336,10 +356,12 @@ class DateTime(Field):
         return super().required and not (self.auto_now or self.auto_now_add)
 
     def to_db(self, value: Any) -> Any:
+        # Normalise to UTC before storing so the ISO text sorts and range-compares
+        # chronologically (mixed offsets would otherwise sort lexicographically).
         if isinstance(value, datetime):
-            return value.isoformat(timespec="microseconds")
+            return _to_utc(value).isoformat(timespec="microseconds")
         if isinstance(value, date):
-            return datetime.combine(value, time()).isoformat(timespec="microseconds")
+            return datetime.combine(value, time(), tzinfo=timezone.utc).isoformat(timespec="microseconds")
         return value
 
     def to_python(self, value: Any) -> Any:

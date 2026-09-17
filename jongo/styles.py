@@ -48,8 +48,16 @@ def rule_css(selector: str, declarations: dict) -> str:
     return "\n".join(out)
 
 
+_VALID_CLASS = __import__("re").compile(r"^[A-Za-z_][-A-Za-z0-9_]*$")
+
+
 class StyleSheet:
     def __init__(self, rules: dict, module: str):
+        for name in rules:
+            # The name becomes a CSS selector (.name-hash); reject anything that could
+            # break out of the selector and inject rules.
+            if not _VALID_CLASS.match(name):
+                raise ValueError(f"invalid style name {name!r}: use letters, digits, - and _")
         payload = json.dumps(rules, sort_keys=True, default=str)
         digest = hashlib.sha1(f"{module}:{payload}".encode()).hexdigest()[:6]
         self.rules = rules

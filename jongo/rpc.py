@@ -18,11 +18,12 @@ import collections.abc
 import dataclasses
 import functools
 import inspect
+import math
 import re
 import types
 import typing
 
-from .errors import HTTPError, NotFound
+from .errors import HTTPError, JongoError, NotFound
 
 SERVER_FUNCTIONS: dict[str, "ServerFunction"] = {}
 
@@ -39,6 +40,14 @@ class ServerFunction:
         params = list(self.signature.parameters.values())
         self.wants_request = bool(params) and params[0].name == "request"
         self._hints = None
+        existing = SERVER_FUNCTIONS.get(self.id)
+        # Factory/closure-built server functions share {module}.{qualname}; without this the
+        # registry would silently keep only the last, so calling endpoint A would run B.
+        if existing is not None and existing.fn is not fn and "<locals>" in fn.__qualname__:
+            raise JongoError(
+                f"two @server functions resolve to the same id {self.id!r}. They're built inside "
+                f"another function, so they collide — move them to module level or give them distinct names."
+            )
         SERVER_FUNCTIONS[self.id] = self
 
     def __call__(self, *args, **kwargs):
@@ -85,12 +94,25 @@ class ServerFunction:
 
         result = self.fn(*bound.args, **bound.kwargs)
         if inspect.isawaitable(result):
-            result = asyncio.run(_await(result))
+            result = _run_sync(result)
         return result
 
 
 async def _await(awaitable):
     return await awaitable
+
+
+def _run_sync(awaitable):
+    """Run an awaitable to completion, whether or not an event loop is already running."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_await(awaitable))
+    # Inside a running loop (async host): run in a fresh loop on a worker thread.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(_await(awaitable))).result()
 
 
 def server(fn=None, *, login_required=False, admin_required=False, refresh=False):
@@ -145,8 +167,11 @@ def coerce(value, hint, name="value"):
             raise first_error
         _bad(name, hint, value)
     if origin is typing.Literal:
-        if value in args:
-            return value
+        # Match by value AND exact type, so JSON false/1.0 don't satisfy Literal[0,1,2,3]
+        # (Python's 0 == False, 1 == 1.0 would otherwise let the wrong type through).
+        for option in args:
+            if type(value) is type(option) and value == option:
+                return value
         raise HTTPError(400, f"argument {name!r} must be one of {', '.join(map(repr, args))}")
     if hint is None or hint is type(None):
         if value is None:
@@ -162,17 +187,24 @@ def coerce(value, hint, name="value"):
         if isinstance(value, float) and value.is_integer():
             return int(value)
         if isinstance(value, str) and re.fullmatch(r"\s*-?\d+\s*", value):
-            return int(value)
+            try:
+                return int(value)  # can raise on absurdly long strings (Python's digit-limit)
+            except ValueError:
+                raise HTTPError(400, f"argument {name!r} is too large") from None
         _bad(name, hint, value)
     if hint is float:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-        if isinstance(value, str):
+            result = float(value)
+        elif isinstance(value, str):
             try:
-                return float(value)
+                result = float(value)
             except ValueError:
-                pass
-        _bad(name, hint, value)
+                _bad(name, hint, value)
+        else:
+            _bad(name, hint, value)
+        if not math.isfinite(result):  # inf/nan can't round-trip to valid JSON
+            raise HTTPError(400, f"argument {name!r} must be a finite number")
+        return result
     if hint is str:
         if isinstance(value, str):
             return value
