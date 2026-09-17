@@ -1,0 +1,58 @@
+name: Publish to PyPI
+
+# Publishes when you create a GitHub release (or run this workflow by hand).
+# Uses PyPI trusted publishing over OIDC, so no API token is stored anywhere.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install --upgrade build pytest -e .
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Check the version matches the tag
+        if: github.event_name == 'release'
+        run: |
+          version=$(python -c "import jongo; print(jongo.__version__)")
+          tag="${GITHUB_REF_NAME#v}"
+          test "$version" = "$tag" || {
+            echo "jongo.__version__ ($version) doesn't match the tag ($tag)"; exit 1;
+          }
+
+      - name: Build the wheel and sdist
+        run: python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # required for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
