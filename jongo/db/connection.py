@@ -27,8 +27,34 @@ _memory_connection: _Connection | None = None
 _savepoint_ids = itertools.count(1)
 
 
+_WRITE = frozenset(("INSERT", "UPDATE", "DELETE", "REPLACE"))
+
+
 class _Connection(sqlite3.Connection):
-    """A sqlite3 connection that can be weakly referenced (so we can track it)."""
+    """A sqlite3 connection that can be weakly referenced (so we can track it).
+
+    Its ``execute`` is the single choke point for data-modifying statements: it
+    times and logs INSERT/UPDATE/DELETE via ``jongo.log`` — including the
+    row-level writes ``Model.save`` issues straight on the connection, which
+    would otherwise bypass the module-level ``execute``. Reads are logged in
+    ``fetch`` (which knows the row count); transaction-control and PRAGMA
+    statements are left silent. When SQL logging is off (production) this adds
+    only one ``isEnabledFor`` check per statement.
+    """
+
+    def execute(self, sql, parameters=()):  # type: ignore[override]
+        if not _jlog.sql_enabled():
+            return super().execute(sql, parameters)
+        head = sql.lstrip()[:12].split(None, 1)[0].upper() if sql.strip() else ""
+        if head not in _WRITE:
+            return super().execute(sql, parameters)  # reads -> fetch(); control -> silent
+        t0 = time.perf_counter()
+        cursor = super().execute(sql, parameters)
+        ms = (time.perf_counter() - t0) * 1000
+        rows = cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else None
+        _jlog.sql(sql, ms, rows)
+        _jlog.record_sql(ms)
+        return cursor
 
 
 def _parse_url(url: str | os.PathLike) -> str:
