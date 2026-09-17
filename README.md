@@ -1,5 +1,9 @@
 # Jongo
 
+[![PyPI](https://img.shields.io/pypi/v/jongo.svg)](https://pypi.org/project/jongo/)
+[![Python](https://img.shields.io/pypi/pyversions/jongo.svg)](https://pypi.org/project/jongo/)
+[![License](https://img.shields.io/pypi/l/jongo.svg)](LICENSE)
+
 **One language for the whole web app.** Jongo is a full-stack Python web framework in the spirit of Django: ORM, migrations, auth, sessions, CSRF protection and an admin site. The difference is that your frontend is Python too. Components render on the server for a fast first paint, then compile to JavaScript and come alive in the browser. They call your server code with a plain `await`.
 
 There's no template language, no separate JS project and no build step. It has zero dependencies.
