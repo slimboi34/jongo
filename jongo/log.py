@@ -112,8 +112,9 @@ def current_stats() -> dict:
 
 
 def sql_enabled() -> bool:
-    """True when it's worth timing SQL (dev/debug or an active request wants counts)."""
-    return get_logger("sql").isEnabledFor(logging.DEBUG) or _stats.get() is not None
+    """True when it's worth timing SQL. Gated purely on the SQL log level, so a
+    production server (WARNING) pays zero per-query timing overhead."""
+    return get_logger("sql").isEnabledFor(logging.DEBUG)
 
 
 # ── domain helpers (keep call sites tiny and consistent) ──────────────────────
