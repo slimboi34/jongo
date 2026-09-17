@@ -356,12 +356,15 @@ class DateTime(Field):
         return super().required and not (self.auto_now or self.auto_now_add)
 
     def to_db(self, value: Any) -> Any:
-        # Normalise to UTC before storing so the ISO text sorts and range-compares
-        # chronologically (mixed offsets would otherwise sort lexicographically).
+        # Normalise aware datetimes to UTC (so mixed offsets sort/range-compare chronologically)
+        # while leaving naive datetimes naive, so each round-trips to an equal value of the same
+        # kind. (Mixing naive and aware values in one column is the only case left unsorted.)
         if isinstance(value, datetime):
-            return _to_utc(value).isoformat(timespec="microseconds")
+            if value.tzinfo is not None:
+                value = value.astimezone(timezone.utc)
+            return value.isoformat(timespec="microseconds")
         if isinstance(value, date):
-            return datetime.combine(value, time(), tzinfo=timezone.utc).isoformat(timespec="microseconds")
+            return datetime.combine(value, time()).isoformat(timespec="microseconds")
         return value
 
     def to_python(self, value: Any) -> Any:
@@ -397,7 +400,7 @@ class Date(Field):
 
     def to_db(self, value: Any) -> Any:
         if isinstance(value, datetime):
-            return value.date().isoformat()
+            return _to_utc(value).date().isoformat()  # UTC date, consistent with DateTime
         if isinstance(value, date):
             return value.isoformat()
         return value
@@ -416,14 +419,15 @@ class Date(Field):
         if value is None or _is_blank_string(value):
             return None
         if isinstance(value, datetime):
-            return value.date()
+            return _to_utc(value).date() if value.tzinfo is not None else value.date()
         if isinstance(value, date):
             return value
         if isinstance(value, str):
             text = value.strip()
             try:
                 if len(text) > 10:
-                    return _parse_datetime_string(text).date()
+                    parsed = _parse_datetime_string(text)
+                    return (_to_utc(parsed).date() if parsed.tzinfo is not None else parsed.date())
                 return date.fromisoformat(text)
             except ValueError:
                 pass

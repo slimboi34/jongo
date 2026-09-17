@@ -64,6 +64,7 @@ class Jongo:
         login_url: str = "/login",
         session_max_age: int = 14 * 24 * 3600,
         static_url: str = "/static",
+        trust_proxy: bool = False,
     ):
         self.name = name or "app"
         module = sys.modules.get(name) if name else None
@@ -80,6 +81,7 @@ class Jongo:
         self.login_url = login_url
         self.session_max_age = session_max_age
         self.static_url = static_url.rstrip("/")
+        self.trust_proxy = trust_proxy  # trust X-Forwarded-Proto only when behind a known proxy
         self.router = Router()
         self.boot_id = secrets.token_hex(8)
         self.before_request_hooks: list = []
@@ -184,9 +186,18 @@ class Jongo:
                 response = self.http_error(request, exc)
             except Exception as exc:
                 response = self.server_error(request, exc)
-            for hook in self.after_request_hooks:
-                response = hook(request, response) or response
-            self._finish(request, response)
+            try:
+                for hook in self.after_request_hooks:
+                    response = hook(request, response) or response
+                self._finish(request, response)
+            except Exception as exc:
+                # A failing after_request hook or _finish (e.g. a non-serialisable session)
+                # must still yield a proper 500 instead of escaping to the WSGI server.
+                response = self.server_error(request, exc)
+                try:
+                    self._finish(request, response)
+                except Exception:
+                    jlog.get_logger("http").error("failed to finalise error response", exc_info=True)
             if self.dev and not (request.path.startswith("/_jongo/app") or request.path == "/_jongo/live"):
                 elapsed = (time.perf_counter() - started) * 1000
                 route_name = getattr(getattr(request, "route", None), "name", None)

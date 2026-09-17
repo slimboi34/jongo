@@ -121,12 +121,23 @@ function $cmp(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+// Python hashes True as 1 and False as 0, so a bool used as a set element or dict key
+// is the same as the int. JS keeps them distinct (Set) / stringifies to "true" (object),
+// so normalise bools to numbers wherever a value is used as a key/member.
+function $key(x) {
+  return typeof x === "boolean" ? +x : x;
+}
+
+function $set(items) {
+  return new Set(items.map($key));
+}
+
 function $in(x, c) {
   if (typeof c === "string") return c.includes(x);
   if (Array.isArray(c)) return c.some((y) => $eq(x, y));
-  if (c instanceof Set || c instanceof Map) return c.has(x);
-  if ($isPlain(c)) return $hasOwn(c, x);
-  if (c !== null && typeof c === "object") return x in c;
+  if (c instanceof Set || c instanceof Map) return c.has($key(x));
+  if ($isPlain(c)) return $hasOwn(c, $key(x));
+  if (c !== null && typeof c === "object") return $key(x) in c;
   throw $b.TypeError(`argument of type '${$typename(c)}' is not iterable`);
 }
 
@@ -144,6 +155,8 @@ function $iadd(a, b) {
 }
 
 function $mul(a, b) {
+  if (typeof a === "boolean") a = +a; // Python: True*[1]==[1], False*[1]==[]
+  if (typeof b === "boolean") b = +b;
   if (typeof a === "number" && typeof b !== "number") [a, b] = [b, a];
   if (typeof a === "string") return b > 0 ? a.repeat(b) : "";
   if (Array.isArray(a)) {
@@ -165,10 +178,18 @@ function $mod(a, b) {
   return ((a % b) + b) % b;
 }
 
+// JS bitwise operators are 32-bit signed; use BigInt so ints up to the float64 range
+// stay correct (1<<40, 0xFFFFFFFF & …) instead of wrapping/going negative.
+function $bigint(x, op) {
+  if (typeof x === "boolean") return x ? 1n : 0n;
+  if (typeof x === "number" && Number.isInteger(x)) return BigInt(x);
+  throw $b.TypeError(`unsupported operand type(s) for ${op}: '${$typename(x)}'`);
+}
+
 function $bor(a, b) {
   if ($isPlain(a) && $isPlain(b)) return { ...a, ...b };
   if (a instanceof Set && b instanceof Set) return new Set([...a, ...b]);
-  return a | b;
+  return Number($bigint(a, "|") | $bigint(b, "|"));
 }
 
 function $sub(a, b) {
@@ -178,14 +199,22 @@ function $sub(a, b) {
 
 function $band(a, b) {
   if (a instanceof Set && b instanceof Set) return new Set([...a].filter((x) => b.has(x)));
-  return a & b;
+  return Number($bigint(a, "&") & $bigint(b, "&"));
 }
 
 function $bxor(a, b) {
   if (a instanceof Set && b instanceof Set) {
     return new Set([...a].filter((x) => !b.has(x)).concat([...b].filter((x) => !a.has(x))));
   }
-  return a ^ b;
+  return Number($bigint(a, "^") ^ $bigint(b, "^"));
+}
+
+function $lshift(a, b) {
+  return Number($bigint(a, "<<") << $bigint(b, "<<"));
+}
+
+function $rshift(a, b) {
+  return Number($bigint(a, ">>") >> $bigint(b, ">>"));
 }
 
 // ---- iteration, indexing, attributes ------------------------------------------
@@ -219,8 +248,9 @@ function $gi(o, k) {
       return o[i];
     }
   } else if ($isPlain(o)) {
-    if (!$hasOwn(o, k)) throw $b.KeyError($repr(k));
-    return o[k];
+    const nk = $key(k);
+    if (!$hasOwn(o, nk)) throw $b.KeyError($repr(k));
+    return o[nk];
   } else if (o instanceof Map) {
     if (!o.has(k)) throw $b.KeyError($repr(k));
     return o.get(k);
@@ -382,6 +412,7 @@ function $fmt(x, spec) {
   const p = prec === undefined ? undefined : +prec;
   let body;
   let signStr = "";
+  let prefix = "";
   if (typeof x === "number") {
     const n = Math.abs(x);
     switch (type) {
@@ -393,34 +424,53 @@ function $fmt(x, spec) {
       case "X": body = Math.trunc(n).toString(16).toUpperCase(); break;
       case "b": body = Math.trunc(n).toString(2); break;
       case "o": body = Math.trunc(n).toString(8); break;
-      case "g": case "G": body = String(p === undefined ? n : +n.toPrecision(p || 1)); break;
-      default: body = p === undefined ? String(n) : String(+n.toPrecision(p || 1));
+      case "c": body = String.fromCodePoint(Math.trunc(x)); break;
+      case "g": case "G": body = $gformat(n, p === undefined ? 6 : p || 1); break;
+      default: body = p === undefined ? String(n) : $gformat(n, p || 1);
     }
-    if (type === "E") body = body.toUpperCase();
-    if (alt) {
-      const prefix = { x: "0x", X: "0X", o: "0o", b: "0b" }[type];
-      if (prefix) body = prefix + body;
-    }
+    if (type === "E" || type === "G") body = body.toUpperCase();
+    if (alt) prefix = { x: "0x", X: "0X", o: "0o", b: "0b" }[type] || "";
     if (group) body = body.replace(/^(\d+)/, (d) => d.replace(/\B(?=(\d{3})+(?!\d))/g, group));
     if (type === "%") body += "%";
-    signStr = x < 0 ? "-" : sign === "+" ? "+" : sign === " " ? " " : "";
-    if (zero && !align) {
-      fill = "0";
-      align = "=";
+    if (type === "c") {
+      align = align || "<"; // a char is aligned like a string and carries no sign
+    } else {
+      signStr = x < 0 ? "-" : sign === "+" ? "+" : sign === " " ? " " : "";
+      if (zero && !align) {
+        fill = "0";
+        align = "=";
+      }
+      align = align || ">";
     }
-    align = align || ">";
   } else {
     body = $str(x);
     if (p !== undefined) body = body.slice(0, p);
     align = align || "<";
   }
   const w = width === undefined ? 0 : +width;
-  const pad = Math.max(0, w - body.length - signStr.length);
-  if (align === "=") return signStr + fill.repeat(pad) + body;
-  const text = signStr + body;
+  const pad = Math.max(0, w - body.length - signStr.length - prefix.length);
+  // "=" fills between the sign/prefix and the digits, so f"{255:#06x}" -> "0x00ff".
+  if (align === "=") return signStr + prefix + fill.repeat(pad) + body;
+  const text = signStr + prefix + body;
   if (align === "<") return text + fill.repeat(pad);
   if (align === "^") return fill.repeat(Math.floor(pad / 2)) + text + fill.repeat(Math.ceil(pad / 2));
   return fill.repeat(pad) + text;
+}
+
+// Python's general ("g") float format: shortest of fixed/exponential at `pr` significant
+// digits, trailing zeros stripped, exponent shown when < -4 or >= pr.
+function $gformat(n, pr) {
+  if (n === 0) return "0";
+  const exp = parseInt(n.toExponential().split("e")[1], 10);
+  if (exp < -4 || exp >= pr) {
+    let [mant, e] = n.toExponential(pr - 1).split("e");
+    if (mant.indexOf(".") >= 0) mant = mant.replace(/0+$/, "").replace(/\.$/, "");
+    const en = parseInt(e, 10);
+    return mant + "e" + (en < 0 ? "-" : "+") + String(Math.abs(en)).padStart(2, "0");
+  }
+  let s = n.toFixed(Math.max(0, pr - 1 - exp));
+  if (s.indexOf(".") >= 0) s = s.replace(/0+$/, "").replace(/\.$/, "");
+  return s;
 }
 
 function $percentFormat(template, values) {
@@ -513,17 +563,41 @@ function $minmax(which) {
 }
 
 function $toInt(x, base) {
-  if (typeof x === "string") {
-    const text = x.trim().replace(/_/g, "");
-    const n = parseInt(text, base || 10);
-    if (Number.isNaN(n) || !/^[-+]?[0-9a-zA-Z]+$/.test(text)) {
-      throw $b.ValueError(`invalid literal for int() with base ${base || 10}: ${$repr(x)}`);
-    }
-    return n;
-  }
   if (typeof x === "boolean") return x ? 1 : 0;
   if (x === undefined) return 0;
-  return Math.trunc(x);
+  if (typeof x === "number") return Math.trunc(x);
+  if (typeof x !== "string") {
+    throw $b.TypeError(`int() argument must be a string or a number, not '${$typename(x)}'`);
+  }
+  const b = base === undefined ? 10 : base;
+  const fail = () => {
+    throw $b.ValueError(`invalid literal for int() with base ${b}: ${$repr(x)}`);
+  };
+  let s = x.trim();
+  let sign = 1;
+  if (s[0] === "+" || s[0] === "-") {
+    if (s[0] === "-") sign = -1;
+    s = s.slice(1);
+  }
+  let radix = b;
+  const low = s.toLowerCase();
+  if (b === 0) {
+    if (low.startsWith("0x")) (radix = 16), (s = s.slice(2));
+    else if (low.startsWith("0o")) (radix = 8), (s = s.slice(2));
+    else if (low.startsWith("0b")) (radix = 2), (s = s.slice(2));
+    else radix = 10;
+  } else if (b === 16 && low.startsWith("0x")) s = s.slice(2);
+  else if (b === 8 && low.startsWith("0o")) s = s.slice(2);
+  else if (b === 2 && low.startsWith("0b")) s = s.slice(2);
+  if (radix < 2 || radix > 36) throw $b.ValueError("int() base must be >= 2 and <= 36, or 0");
+  if (/^_|_$|__/.test(s)) fail(); // underscores only as single separators between digits
+  s = s.replace(/_/g, "");
+  if (s === "") fail();
+  const digits = "0123456789abcdefghijklmnopqrstuvwxyz".slice(0, radix);
+  if (!new RegExp(`^[${digits}]+$`, "i").test(s)) fail(); // reject trailing garbage like "1a"/"42px"
+  const n = parseInt(s, radix);
+  if (Number.isNaN(n)) fail();
+  return sign * n;
 }
 
 function $round(x, n) {
@@ -567,10 +641,16 @@ Object.assign($b, {
   str: (x = "") => $str(x),
   int: $toInt,
   float(x = 0) {
-    const n = typeof x === "string" ? Number(x.trim()) : Number(x);
-    if (Number.isNaN(n) && !/^\s*nan\s*$/i.test(String(x))) {
-      throw $b.ValueError(`could not convert string to float: ${$repr(x)}`);
-    }
+    if (typeof x === "boolean") return x ? 1 : 0;
+    if (typeof x === "number") return x;
+    const s = String(x).trim();
+    const body = s.replace(/^[+-]/, "");
+    const low = body.toLowerCase();
+    if (low === "inf" || low === "infinity") return s[0] === "-" ? -Infinity : Infinity;
+    if (low === "nan") return NaN;
+    if (/^_|_$|__/.test(body)) throw $b.ValueError(`could not convert string to float: ${$repr(x)}`);
+    const n = Number(s.replace(/_/g, "")); // Python allows single "_" digit separators
+    if (Number.isNaN(n)) throw $b.ValueError(`could not convert string to float: ${$repr(x)}`);
     return n;
   },
   bool: (x) => $t(x),
@@ -625,7 +705,8 @@ Object.assign($b, {
     if (Array.isArray(T)) return T.some((t) => $b.isinstance(x, t));
     switch (T) {
       case $b.str: return typeof x === "string";
-      case $b.int: return Number.isInteger(x);
+      // bool is a subclass of int in Python (isinstance(True, int) is True).
+      case $b.int: return typeof x === "boolean" || (typeof x === "number" && Number.isInteger(x));
       case $b.float: return typeof x === "number";
       case $b.bool: return typeof x === "boolean";
       case $b.list: case $b.tuple: return Array.isArray(x);
@@ -795,19 +876,19 @@ const $LIST = {
 };
 
 const $DICT = {
-  get: (d, [k, dflt = null]) => ($hasOwn(d, k) ? d[k] : dflt),
+  get: (d, [k, dflt = null]) => ($hasOwn(d, $key(k)) ? d[$key(k)] : dflt),
   keys: (d) => Object.keys(d),
   values: (d) => Object.values(d),
   items: (d) => Object.entries(d),
   pop(d, args) {
-    const k = args[0];
+    const k = $key(args[0]);
     if ($hasOwn(d, k)) {
       const v = d[k];
       delete d[k];
       return v;
     }
     if (args.length > 1) return args[1];
-    throw $b.KeyError($repr(k));
+    throw $b.KeyError($repr(args[0]));
   },
   update(d, [o], kw) {
     if (o !== undefined && o !== null) {
@@ -817,8 +898,9 @@ const $DICT = {
     Object.assign(d, kw);
   },
   setdefault(d, [k, v = null]) {
-    if (!$hasOwn(d, k)) d[k] = v;
-    return d[k];
+    const nk = $key(k);
+    if (!$hasOwn(d, nk)) d[nk] = v;
+    return d[nk];
   },
   copy: (d) => ({ ...d }),
   clear(d) { for (const k of Object.keys(d)) delete d[k]; },

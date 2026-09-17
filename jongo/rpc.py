@@ -182,16 +182,21 @@ def coerce(value, hint, name="value"):
             return value
         _bad(name, hint, value)
     if hint is int:
+        result = None
         if isinstance(value, int) and not isinstance(value, bool):
-            return value
-        if isinstance(value, float) and value.is_integer():
-            return int(value)
-        if isinstance(value, str) and re.fullmatch(r"\s*-?\d+\s*", value):
+            result = value
+        elif isinstance(value, float) and value.is_integer():
+            result = int(value)
+        elif isinstance(value, str) and re.fullmatch(r"\s*-?\d+\s*", value):
             try:
-                return int(value)  # can raise on absurdly long strings (Python's digit-limit)
+                result = int(value)  # can raise on absurdly long strings (Python's digit-limit)
             except ValueError:
                 raise HTTPError(400, f"argument {name!r} is too large") from None
-        _bad(name, hint, value)
+        if result is None:
+            _bad(name, hint, value)
+        if not -(2**63) <= result < 2**63:  # bound numbers too, not just strings; SQLite stores 64-bit
+            raise HTTPError(400, f"argument {name!r} is out of range")
+        return result
     if hint is float:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             result = float(value)
@@ -224,8 +229,12 @@ def coerce(value, hint, name="value"):
     if container in (dict, collections.abc.Mapping):
         if not isinstance(value, dict):
             _bad(name, hint, value)
+        key_type = args[0] if len(args) == 2 else typing.Any
         value_type = args[1] if len(args) == 2 else typing.Any
-        return {k: coerce(v, value_type, f"{name}[{k!r}]") for k, v in value.items()}
+        return {
+            coerce(k, key_type, f"{name} key {k!r}"): coerce(v, value_type, f"{name}[{k!r}]")
+            for k, v in value.items()
+        }
     if _is_model(hint):
         pk = value.get("id") if isinstance(value, dict) else value
         pk = coerce(pk, int, name)

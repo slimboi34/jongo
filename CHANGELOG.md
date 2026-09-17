@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.2.2
+
+A second stress-audit pass: 27 fixes (of 32 findings; the other 5 are documented as
+inherent JS-value-model limits below). Regression tests added (suite → 167).
+
+### Security
+
+- **vdom:** `iframe(srcdoc=…)` is dropped (escaping still delivered runnable same-origin
+  HTML → stored XSS); bare `on*` event-handler attribute *names* (`onerror`, `onfocus`) are
+  rejected — only Jongo's `on:` directive form is allowed; `data:text/html` URLs are blocked
+  (raster `data:image/*` still allowed); `Decimal('NaN')/('Infinity')` now serialize to `null`
+  instead of putting a literal `NaN` on the wire; the `$v` sentinel is escaped for element prop
+  names too (completing the 0.2.0 fix).
+- **http:** a negative/bogus `Content-Length` is rejected before `read()` (it previously slipped
+  past the 16 MB body cap → unauthenticated memory DoS); CR/LF are stripped from response header
+  values (no header/response splitting via `redirect()`); `X-Forwarded-Proto` is trusted only
+  with the new `Jongo(trust_proxy=True)` opt-in (a client can no longer drop the `Secure` cookie
+  flag on HTTPS); exceptions in `after_request`/`_finish` are caught and return a 500 instead of
+  escaping to the WSGI server; `set_cookie` validates name/path/samesite with a clean error.
+
+### Correctness
+
+- **compiler:** `bool` is treated as `int` for set/dict membership and lookup (`True in {1,2,3}`,
+  `{1:'x'}[True]`, `.get`/`.setdefault`/`.pop`) and for `isinstance(True, int)`; set literals
+  dedup bool/int (`len({1, True}) == 1`); bitwise `& | ^ << >>` are correct beyond 32 bits;
+  `int()` string parsing rejects trailing garbage (`int("42px")`), honors base prefixes and
+  underscores; `float("inf")`/`"nan"`/`"1_000"` parse; `bool * list`; and format-spec edges
+  (`f"{255:#06x}"`, `:g`, `:c`).
+- **rpc/orm:** naive datetimes now round-trip type-consistently (fixes a 0.2.0 regression where a
+  naive value reloaded tz-aware and broke `==`/`<`) while keeping chronological ordering across
+  offsets; a bad foreign-key id and `UNIQUE` violations (on `create`, `save` and `update`) raise
+  `ValidationError` instead of a raw `sqlite3.IntegrityError`/500; RPC `dict[K, V]` coerces keys as
+  well as values; integer RPC params are bounded to 64-bit for JSON numbers, not just strings;
+  `Date` normalizes consistently with `DateTime`.
+
+### Known limitations (documented, inherent to the browser's value model)
+
+These are consequences of JavaScript having one number type, string-keyed objects, and UTF-16
+strings; a clean fix needs a boxed value model. Browser (post-hydration) code only — the server
+is always correct.
+
+- `str()`/f-string of an integral float drops the `.0` (`str(10/2)` → `"5"`); format explicitly,
+  e.g. `f"{x:.2f}"`.
+- A dict keyed by ints iterates *string* keys in the browser (`list({1:'a'}.keys())` → `["1"]`);
+  lookups still work.
+- `isinstance` can't distinguish int from float (`isinstance(5, float)` is True); the
+  `isinstance(True, int)` case is correct.
+- `len("😀")` counts UTF-16 units (2), not code points; `list(s)` iteration is code-point correct.
+- Tuples and lists compare equal (`(1,2) == [1,2]`), both being JS arrays.
+- Adding a NOT-NULL column to a populated table keeps a `DEFAULT` in the column DDL (SQLite
+  requires it to backfill), so such a table differs cosmetically from a freshly-created one.
+
 ## 0.2.1
 
 Observability: a first-class logging system for humans *and* AI agents. No wiring

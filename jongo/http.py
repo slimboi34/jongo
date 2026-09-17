@@ -36,8 +36,12 @@ def parse_cookie_header(header: str) -> dict[str, str]:
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] == '"':
-            value = value[1:-1]
-        cookies.setdefault(name.strip(), urllib.parse.unquote(value))
+            # SimpleCookie quotes special values as "..." with backslash escapes; undo that.
+            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        # Cookie values are sent verbatim (set_cookie/SimpleCookie does not percent-encode),
+        # so must NOT be unquoted here, or "a%20b" would corrupt to "a b". Last occurrence
+        # wins, matching SimpleCookie and browser behaviour.
+        cookies[name.strip()] = value
     return cookies
 
 
@@ -144,8 +148,14 @@ class Request:
 
     @property
     def scheme(self) -> str:
-        forwarded = self.headers.get("x-forwarded-proto")
-        return forwarded or self.environ.get("wsgi.url_scheme", "http")
+        # X-Forwarded-Proto is client-controlled; trusting it by default lets a client
+        # strip the Secure cookie flag / spoof request.url. Opt in with Jongo(trust_proxy=True)
+        # only when a trusted proxy sets the header.
+        if getattr(self.app, "trust_proxy", False):
+            forwarded = self.headers.get("x-forwarded-proto")
+            if forwarded:
+                return forwarded.split(",")[0].strip().lower()
+        return self.environ.get("wsgi.url_scheme", "http")
 
     @property
     def host(self) -> str:
@@ -178,6 +188,10 @@ class Request:
                 length = int(self.environ.get("CONTENT_LENGTH") or 0)
             except ValueError:
                 length = 0
+            if length < 0:
+                # A negative Content-Length must never reach read(): read(-1) drains the
+                # whole stream and defeats max_body_size (unauthenticated memory DoS).
+                raise HTTPError(400, "Invalid Content-Length")
             if length > self.max_body_size:
                 raise HTTPError(413, "Request body too large")
             stream = self.environ.get("wsgi.input")
@@ -283,8 +297,13 @@ class Response:
         self.body = body
 
     def set_cookie(self, name, value, *, max_age=None, path="/", httponly=True, samesite="Lax", secure=False):
-        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in str(value)):
+        def _ctrl(s):
+            return any(ord(c) < 0x20 or ord(c) == 0x7f for c in str(s))
+
+        if _ctrl(value):
             raise ValueError(f"cookie {name!r} value contains control characters; encode it first")
+        if _ctrl(name) or _ctrl(path) or (samesite and _ctrl(samesite)):
+            raise ValueError(f"cookie {name!r} name/path/samesite contains control characters")
         morsel = http.cookies.SimpleCookie()
         morsel[name] = value
         cookie = morsel[name]
@@ -316,10 +335,14 @@ class Response:
         except ValueError:
             phrase = "Unknown"
         body = self.iter_body()
-        headers = list(self.headers.items())
+
+        def _clean(v):  # strip CR/LF so a value like a redirect Location can't split the response
+            return str(v).replace("\r", "").replace("\n", "")
+
+        headers = [(k, _clean(v)) for k, v in self.headers.items()]
         if isinstance(body, list) and "Content-Length" not in self.headers:
             headers.append(("Content-Length", str(sum(len(b) for b in body))))
-        headers.extend(("Set-Cookie", c) for c in self.cookies)
+        headers.extend(("Set-Cookie", _clean(c)) for c in self.cookies)
         start_response(f"{self.status} {phrase}", headers)
         if environ.get("REQUEST_METHOD") == "HEAD":
             return [b""]

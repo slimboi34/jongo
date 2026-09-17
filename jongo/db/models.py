@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import copy
 import re
+import sqlite3
 from datetime import date, datetime
 from typing import Any
 
 from . import connection
 from .fields import DateTime, Field, ForeignKey, Int, ValidationError, utcnow
-from .query import DoesNotExist, MultipleObjectsReturned, Q, QuerySet, quote
+from .query import DoesNotExist, MultipleObjectsReturned, Q, QuerySet, integrity_to_validation, quote
 
 models_registry: dict[str, type[Model]] = {}
 _relations: list[ForeignKey] = []
@@ -341,24 +342,27 @@ class Model(metaclass=ModelMeta):
         table = quote(meta.table)
         columns = [quote(field.column) for field in meta.fields]
         values = [field.to_db(self.__dict__[field.attname]) for field in meta.fields]
-        with connection.locked() as conn:
-            if self.pk is not None:
+        try:
+            with connection.locked() as conn:
+                if self.pk is not None:
+                    if columns:
+                        sets = ", ".join(f"{column} = ?" for column in columns)
+                        updated = conn.execute(f'UPDATE {table} SET {sets} WHERE "id" = ?', [*values, self.pk]).rowcount
+                    else:
+                        updated = conn.execute(f'SELECT 1 FROM {table} WHERE "id" = ?', [self.pk]).fetchone() is not None
+                    if updated:
+                        return self
+                    columns, values = ['"id"', *columns], [self.pk, *values]
                 if columns:
-                    sets = ", ".join(f"{column} = ?" for column in columns)
-                    updated = conn.execute(f'UPDATE {table} SET {sets} WHERE "id" = ?', [*values, self.pk]).rowcount
+                    placeholders = ", ".join("?" * len(columns))
+                    sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
                 else:
-                    updated = conn.execute(f'SELECT 1 FROM {table} WHERE "id" = ?', [self.pk]).fetchone() is not None
-                if updated:
-                    return self
-                columns, values = ['"id"', *columns], [self.pk, *values]
-            if columns:
-                placeholders = ", ".join("?" * len(columns))
-                sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
-            else:
-                sql = f"INSERT INTO {table} DEFAULT VALUES"
-            cursor = conn.execute(sql, values)
-            if self.pk is None:
-                self.pk = cursor.lastrowid
+                    sql = f"INSERT INTO {table} DEFAULT VALUES"
+                cursor = conn.execute(sql, values)
+                if self.pk is None:
+                    self.pk = cursor.lastrowid
+        except sqlite3.IntegrityError as exc:  # backstop (races, or a constraint full_clean can't pre-check)
+            raise (integrity_to_validation(exc, type(self)) or exc) from exc
         return self
 
     def _sync_relations(self) -> None:
@@ -417,6 +421,13 @@ class Model(metaclass=ModelMeta):
                 duplicates = duplicates.exclude(id=self.pk)
             if duplicates.exists():
                 errors[field.name] = f"{_capfirst(meta.verbose_name)} with this {field.label.lower()} already exists."
+
+        for field in meta.fields:  # a bad FK id should be a clean ValidationError, not a raw IntegrityError
+            if not isinstance(field, ForeignKey) or field.name in errors:
+                continue
+            value = self.__dict__.get(field.attname)
+            if value is not None and not field.related_model.filter(id=value).exists():
+                errors[field.name] = f"Select a valid choice; that {field.related_model._meta.verbose_name} does not exist."
 
         try:
             self.clean()

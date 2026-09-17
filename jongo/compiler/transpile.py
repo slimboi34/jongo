@@ -574,13 +574,14 @@ class FunctionTranspiler:
                 return f"({left} - {right})"
             return f"$sub({left}, {right})"  # set difference when both are sets
         simple = {
-            ast.Div: "/", ast.Pow: "**", ast.LShift: "<<", ast.RShift: ">>",
+            ast.Div: "/", ast.Pow: "**",
         }
         if kind in simple:
             return f"({left} {simple[kind]} {right})"
         helpers = {
             ast.FloorDiv: "$floordiv", ast.Mod: "$mod", ast.BitOr: "$bor",
             ast.BitAnd: "$band", ast.BitXor: "$bxor",  # set intersection / symmetric difference
+            ast.LShift: "$lshift", ast.RShift: "$rshift",  # BigInt-backed, not 32-bit JS shifts
         }
         if kind in helpers:
             return f"{helpers[kind]}({left}, {right})"
@@ -646,7 +647,7 @@ class FunctionTranspiler:
     x_Tuple = x_List
 
     def x_Set(self, node):
-        return f"new Set([{self._elements(node.elts)}])"
+        return f"$set([{self._elements(node.elts)}])"  # normalises bool/int members (True == 1)
 
     def x_Dict(self, node):
         items = []
@@ -656,7 +657,7 @@ class FunctionTranspiler:
             elif isinstance(key, ast.Constant) and isinstance(key.value, str):
                 items.append(f"{js_string(key.value)}: {self.expr(value)}")
             else:
-                items.append(f"[{self.expr(key)}]: {self.expr(value)}")
+                items.append(f"[$key({self.expr(key)})]: {self.expr(value)}")  # True/False key == 1/0
         return "({" + ", ".join(items) + "})"
 
     def comprehension(self, node, kind) -> str:
@@ -679,9 +680,9 @@ class FunctionTranspiler:
                 for cond in gen.ifs:
                     code.append(f"if (!{self.test(cond)}) continue;")
             if kind == "dict":
-                code.append(f"$r[{self.expr(node.key)}] = {self.expr(node.value)};")
+                code.append(f"$r[$key({self.expr(node.key)})] = {self.expr(node.value)};")
             elif kind == "set":
-                code.append(f"$r.add({self.expr(node.elt)});")
+                code.append(f"$r.add($key({self.expr(node.elt)}));")
             else:
                 code.append(f"$r.push({self.expr(node.elt)});")
             code.append("}" * len(generators))

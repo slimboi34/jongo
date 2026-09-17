@@ -9,6 +9,32 @@ from typing import TYPE_CHECKING, Any
 from . import connection
 from .fields import DateTime, Field, ForeignKey, ValidationError, utcnow
 
+
+def integrity_to_validation(exc: "sqlite3.IntegrityError", model) -> "ValidationError | None":
+    """Map a raw sqlite IntegrityError to a field-scoped ValidationError, or None to re-raise."""
+    msg = str(exc)
+    meta = model._meta
+
+    def field_for(ref: str):
+        col = ref.split(".")[-1].strip()
+        return next((f for f in meta.fields if f.column == col), None)
+
+    vn = meta.verbose_name[:1].upper() + meta.verbose_name[1:]
+    if "UNIQUE constraint failed" in msg:
+        field = field_for(msg.split(":", 1)[1]) if ":" in msg else None
+        name = field.name if field else "__all__"
+        label = field.label.lower() if field else "value"
+        return ValidationError({name: f"{vn} with this {label} already exists."})
+    if "NOT NULL constraint failed" in msg:
+        field = field_for(msg.split(":", 1)[1]) if ":" in msg else None
+        return ValidationError({(field.name if field else "__all__"): "This field is required."})
+    if "FOREIGN KEY constraint failed" in msg:  # sqlite doesn't name the column
+        fks = [f for f in meta.fields if isinstance(f, ForeignKey)]
+        name = fks[0].name if len(fks) == 1 else "__all__"
+        target = fks[0].related_model._meta.verbose_name if len(fks) == 1 else "related object"
+        return ValidationError({name: f"Select a valid choice; that {target} does not exist."})
+    return None
+
 if TYPE_CHECKING:
     from .models import Model
 
@@ -367,9 +393,12 @@ class QuerySet:
             return 0
         sets = ", ".join(f"{quote(column)} = ?" for column in assignments)
         where, params = self._write_where_sql()
-        cursor = connection.execute(
-            f"UPDATE {quote(meta.table)} SET {sets}{where}", [*assignments.values(), *params]
-        )
+        try:
+            cursor = connection.execute(
+                f"UPDATE {quote(meta.table)} SET {sets}{where}", [*assignments.values(), *params]
+            )
+        except sqlite3.IntegrityError as exc:  # e.g. a UNIQUE violation update() can't pre-check
+            raise (integrity_to_validation(exc, self.model) or exc) from exc
         self._cache = None
         return cursor.rowcount
 

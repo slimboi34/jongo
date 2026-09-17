@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jongo"
-version = "0.2.1"
+version = "0.2.2"
 description = "A full-stack Python web framework: routes, server code and reactive UI in one language."
 readme = "README.md"
 requires-python = ">=3.10"

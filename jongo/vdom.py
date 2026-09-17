@@ -28,6 +28,11 @@ RAW_TEXT_TAGS = frozenset(("script", "style"))
 _VALID_TAG = re.compile(r"^[A-Za-z][A-Za-z0-9-]*$")
 _VALID_ATTR = re.compile(r"^[A-Za-z_:][-A-Za-z0-9_:.]*$")
 _URL_ATTRS = frozenset(("href", "src", "action", "formaction", "xlink:href", "poster", "cite", "data"))
+# Attributes that are never safe to set from data: `on*` are inline event handlers, and
+# `srcdoc` is a nested HTML document the browser runs same-origin (escaping only arms it).
+_EVENT_ATTR = re.compile(r"^on", re.IGNORECASE)
+_BLOCKED_ATTRS = frozenset(("srcdoc",))
+_SAFE_DATA_IMAGE = re.compile(r"image/(png|jpe?g|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon)")
 
 
 def _is_dangerous_url(value) -> bool:
@@ -36,7 +41,13 @@ def _is_dangerous_url(value) -> bool:
         return False
     # Browsers ignore control chars/whitespace inside the scheme, so strip them before checking.
     scheme = re.sub(r"[\x00-\x20]", "", s.split(":", 1)[0]).lower()
-    return scheme in ("javascript", "vbscript")
+    if scheme in ("javascript", "vbscript"):
+        return True
+    if scheme == "data":
+        # Allow only raster image data URLs; block text/html, svg, etc. (they can run script).
+        media = re.sub(r"[\x00-\x20]", "", s.split(":", 1)[1].split(",", 1)[0]).lower()
+        return not _SAFE_DATA_IMAGE.match(media)
+    return False
 UNITLESS_CSS = frozenset(
     "opacity z-index flex flex-grow flex-shrink font-weight line-height order zoom scale "
     "grid-row grid-column aspect-ratio".split()
@@ -365,23 +376,24 @@ def _render(node, out, select_value) -> bool:
     tag = node.type
     if not _VALID_TAG.match(tag):
         raise JongoError(f"invalid tag name {tag!r}: tag names must be letters, digits and hyphens")
+    tl = tag.lower()
     props = node.props
-    if tag == "option" and select_value is not None and "selected" not in props:
+    if tl == "option" and select_value is not None and "selected" not in props:
         props = {**props, "selected": str(props.get("value")) == str(select_value)}
     out.append("<" + tag)
-    _render_attrs(tag, props, out)
+    _render_attrs(tl, props, out)
     out.append(">")
-    if tag in VOID_TAGS:
+    if tl in VOID_TAGS:
         return False
     if "inner_html" in props:
         out.append(str(props["inner_html"] or ""))
-    elif tag == "textarea" and props.get("value") is not None:
+    elif tl == "textarea" and props.get("value") is not None:
         out.append(_html.escape(str(props["value"]), quote=False))
-    elif tag in RAW_TEXT_TAGS:
+    elif tl in RAW_TEXT_TAGS:
         for child in node.children:
             out.append(str(child).replace("</", "<\\/"))
     else:
-        child_select = props.get("value") if tag == "select" else select_value
+        child_select = props.get("value") if tl == "select" else select_value
         _render_children(node.children, out, child_select)
     out.append(f"</{tag}>")
     return False
@@ -419,8 +431,10 @@ def _render_attrs(tag, props, out):
                 continue
         if not _VALID_ATTR.match(name):
             continue  # drop names that would inject markup/handlers
+        if _EVENT_ATTR.match(name) or name.lower() in _BLOCKED_ATTRS:
+            continue  # inline on* handlers and srcdoc are never settable from data
         if name in _URL_ATTRS and value is not True and _is_dangerous_url(value):
-            continue  # neutralize javascript:/vbscript: URLs
+            continue  # neutralize javascript:/vbscript:/data:text/html URLs
         if value is True:
             out.append(" " + name)
         else:
@@ -479,13 +493,19 @@ def to_json_data(value, where: str = "value"):
     if isinstance(value, VNode):
         return {"$v": serialize(value)}
     if isinstance(value, dict):
-        return {_escape_key(str(k)): to_json_data(v, f"{where}[{k!r}]") for k, v in value.items()}
+        out: dict = {}
+        for k, v in value.items():
+            key = _escape_key(str(k))
+            if key in out:  # distinct keys must not silently collide as JSON strings
+                raise JongoError(f"{where}: dict keys collide as the JSON string {key!r}")
+            out[key] = to_json_data(v, f"{where}[{k!r}]")
+        return out
     if isinstance(value, (list, tuple, set, frozenset)):
         return [to_json_data(v, f"{where}[{i}]") for i, v in enumerate(value)]
     if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
         return value.isoformat()
     if isinstance(value, decimal.Decimal):
-        return float(value)
+        return float(value) if value.is_finite() else None  # NaN/Infinity aren't valid JSON
     if isinstance(value, uuid.UUID):
         return str(value)
     if hasattr(value, "to_dict") and callable(value.to_dict):
@@ -523,7 +543,9 @@ def serialize(node):
                     f"<{node.type} {name.replace('on:', 'on_')}=...> is outside any @component. Event handlers "
                     "and refs run in the browser, so move this markup into a @component function"
                 )
-            props[name] = to_json_data(value, f"<{node.type}> {name}")
+            # Escape the $v-family in element prop NAMES too, so div(**{"$v": nodeData})
+            # can't be revived into a live VNode (component prop names go through to_json_data).
+            props[_escape_key(name)] = to_json_data(value, f"<{node.type}> {name}")
         data = {"t": node.type, "p": props}
     if node.children:
         data["c"] = [serialize(c) for c in node.children]
