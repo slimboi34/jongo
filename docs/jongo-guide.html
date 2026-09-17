@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Jongo — How it works, and why it beats Django</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 16mm; }
+  @page :first { margin: 0; }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    margin: 0; color: #211d1a; background: white;
+    font: 10.5pt/1.55 Georgia, "Times New Roman", serif;
+  }
+  h1, h2, h3, h4, .sans { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  h2 {
+    font-size: 19pt; letter-spacing: -0.02em; margin: 0 0 4pt; line-height: 1.1;
+  }
+  h3 { font-size: 12pt; margin: 16pt 0 4pt; letter-spacing: -0.01em; }
+  h4 { font-size: 10pt; margin: 12pt 0 2pt; text-transform: uppercase; letter-spacing: .07em; color: #8a7f76; }
+  p { margin: 0 0 8pt; }
+  a { color: #b8431f; text-decoration: none; }
+  code, pre { font-family: "SF Mono", Menlo, Consolas, monospace; }
+  code { font-size: 9pt; background: #f4efe8; padding: 0.5pt 3pt; border-radius: 3px; }
+  pre {
+    font-size: 8.2pt; line-height: 1.45; background: #fbf8f4; border: 1px solid #e9e1d6;
+    border-left: 3px solid #e4572e; border-radius: 5px; padding: 9pt 11pt; margin: 8pt 0 10pt;
+    overflow: hidden; white-space: pre-wrap; word-wrap: break-word;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .kw { color: #a2371a; font-weight: 600; }
+  .cm { color: #8a7f76; font-style: italic; }
+  .st { color: #2e6b45; }
+  .section { break-before: page; }
+  .eyebrow { font: 600 8.5pt/1 "Helvetica Neue", Arial, sans-serif; letter-spacing: .14em;
+             text-transform: uppercase; color: #e4572e; margin-bottom: 6pt; }
+  .lead { font-size: 11.5pt; color: #4c453f; margin-bottom: 14pt; }
+  table { width: 100%; border-collapse: collapse; margin: 6pt 0 12pt; font-size: 9pt; break-inside: avoid; }
+  th, td { text-align: left; vertical-align: top; padding: 5pt 7pt; border-bottom: 1px solid #eae3da; }
+  th { font: 600 8pt/1.3 "Helvetica Neue", Arial, sans-serif; text-transform: uppercase;
+       letter-spacing: .06em; color: #8a7f76; background: #fbf8f4; }
+  td code { font-size: 8.2pt; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12pt; }
+  .note {
+    background: #fdf4ef; border: 1px solid #f3d9cb; border-radius: 6px; padding: 8pt 11pt;
+    margin: 10pt 0; font-size: 9.5pt; break-inside: avoid;
+  }
+  .note strong { color: #a2371a; }
+  figure { margin: 10pt 0 14pt; break-inside: avoid; }
+  figcaption { font: 8.5pt/1.4 "Helvetica Neue", Arial, sans-serif; color: #8a7f76; margin-top: 4pt; }
+  ul, ol { margin: 0 0 9pt; padding-left: 16pt; }
+  li { margin-bottom: 3pt; }
+  .cover {
+    height: 297mm; padding: 34mm 24mm; color: white;
+    background: #1c1a1f; display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .cover h1 { font-size: 40pt; line-height: 1.02; letter-spacing: -0.035em; margin: 0 0 10pt; }
+  .cover .sub { font-size: 14pt; color: #cdc5bd; max-width: 135mm; line-height: 1.4; }
+  .diamond { color: #e4572e; }
+  .cover .meta { font: 9.5pt/1.7 "Helvetica Neue", Arial, sans-serif; color: #a89e95; }
+  .cover .rule { height: 3px; width: 64pt; background: #e4572e; margin: 0 0 18pt; }
+  .toc { font: 10pt/2 "Helvetica Neue", Arial, sans-serif; column-count: 2; column-gap: 18pt; }
+  .toc b { color: #e4572e; display: inline-block; width: 22pt; }
+  .stat { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8pt; margin: 10pt 0 14pt; }
+  .stat div { background: #fbf8f4; border: 1px solid #eae3da; border-radius: 6px; padding: 8pt; text-align: center; }
+  .stat strong { display: block; font: 700 17pt/1.1 "Helvetica Neue", Arial, sans-serif; letter-spacing: -0.02em; }
+  .stat span { font: 8pt/1.3 "Helvetica Neue", Arial, sans-serif; color: #8a7f76; }
+  .win { color: #2e6b45; font-weight: 600; }
+  .loss { color: #a2371a; font-weight: 600; }
+  .footer-note { font-size: 8.5pt; color: #8a7f76; font-family: "Helvetica Neue", Arial, sans-serif; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div>
+    <div style="font:600 9pt/1 'Helvetica Neue',Arial,sans-serif; letter-spacing:.2em; text-transform:uppercase; color:#e4572e;">
+      <span class="diamond">◆</span> Jongo 0.1
+    </div>
+  </div>
+  <div>
+    <div class="rule"></div>
+    <h1>How Jongo works,<br>and why it beats Django</h1>
+    <p class="sub">A full-stack Python web framework where the pages, the server code and the
+    interactive frontend are all written in one language — and the frontend compiles to JavaScript.</p>
+  </div>
+  <div class="meta">
+    Written for Joshua Harty · 17 September 2026<br>
+    Source: <code style="background:#2a262d;color:#e8e2da;">~/jongo</code> · 6,662 lines of Python ·
+    1,476 lines of browser runtime · 117 tests · zero dependencies
+  </div>
+</div>
+
+<div class="section">
+  <div class="eyebrow">Contents</div>
+  <h2>What's in this guide</h2>
+  <p class="lead">Read it beside the code in VS Code. Every section names the files it describes.</p>
+  <div class="toc">
+    <div><b>1</b> The idea in one page</div>
+    <div><b>2</b> A whole app, annotated</div>
+    <div><b>3</b> What happens when a page loads</div>
+    <div><b>4</b> The compiler: Python to JavaScript</div>
+    <div><b>5</b> The browser runtime</div>
+    <div><b>6</b> Server functions</div>
+    <div><b>7</b> Models and migrations</div>
+    <div><b>8</b> Batteries: auth, admin, dev server</div>
+    <div><b>9</b> Jongo vs Django, honestly</div>
+    <div><b>10</b> By the numbers</div>
+    <div><b>11</b> Limits and what's next</div>
+    <div><b>12</b> Cheat sheet and file map</div>
+  </div>
+
+  <h3>The one-sentence version</h3>
+  <p>Django gives you a great backend and then leaves the browser to you. Jongo keeps the backend
+  — an ORM, migrations, auth, sessions, CSRF, an admin site — and adds the missing half: you write
+  your interface as Python functions, Jongo renders them on the server for the first paint, compiles
+  the same functions to JavaScript, and wakes them up in the browser so they react to clicks
+  without a page reload.</p>
+
+  <div class="note">
+    <strong>The test that matters.</strong> A todo list with live updates, written in Django, is
+    <code>models.py</code> + <code>urls.py</code> + <code>views.py</code> + <code>forms.py</code> +
+    a template + an API endpoint + a JavaScript file. In Jongo it is one file of about 60 lines,
+    and you never write a fetch call, a template tag, or a serializer.
+  </div>
+</div>
+
+<div class="section">
+  <div class="eyebrow">1</div>
+  <h2>The idea in one page</h2>
+  <p class="lead">One feature should live in one place.</p>
+
+  <p>In Django a single feature is scattered by file type rather than by purpose. The URL lives in
+  one file, the view in another, the markup in a third, and anything interactive in a fourth
+  language entirely. You hold the whole map in your head to change one button.</p>
+
+  <table>
+    <tr><th style="width:26%">Concern</th><th style="width:37%">Django</th><th>Jongo</th></tr>
+    <tr><td>URL</td><td><code>urls.py</code>, a separate <code>path()</code> entry</td><td><code>@app.page("/todos/&lt;id&gt;")</code> on the function</td></tr>
+    <tr><td>View</td><td><code>views.py</code></td><td>the decorated function itself</td></tr>
+    <tr><td>Markup</td><td>a <code>.html</code> template in a second language</td><td>Python calls: <code>div(h1(title))</code></td></tr>
+    <tr><td>Interactivity</td><td>hand-written JavaScript, or HTMX</td><td>the same component, compiled to JS</td></tr>
+    <tr><td>AJAX endpoint</td><td>view + URL + <code>fetch()</code> + JSON handling</td><td><code>@server</code> function, called with <code>await</code></td></tr>
+    <tr><td>Input validation</td><td>form or serializer classes</td><td>type hints: <code>title: str</code>, <code>todo: Todo</code></td></tr>
+    <tr><td>Schema changes</td><td><code>makemigrations</code> + migration files in git</td><td><code>jongo migrate</code> diffs models against the live DB</td></tr>
+    <tr><td>Static assets</td><td><code>collectstatic</code>, a bundler for JS</td><td>one generated file, no build step</td></tr>
+  </table>
+
+  <h3>The same feature, both ways</h3>
+  <div class="two">
+    <div>
+      <h4>Django — four files</h4>
+<pre><code><span class="cm"># urls.py</span>
+path("todos/", views.todo_list, name="todos")
+
+<span class="cm"># views.py</span>
+<span class="kw">def</span> todo_list(request):
+    todos = Todo.objects.all()
+    <span class="kw">return</span> render(request, "todos.html",
+                  {"todos": todos})
+
+<span class="cm"># todos.html</span>
+{% for todo in todos %}
+  &lt;li&gt;{{ todo.title }}&lt;/li&gt;
+{% endfor %}
+
+<span class="cm"># todos.js — and an API view for it</span>
+fetch("/api/todos/", {method: "POST",
+  headers: {"X-CSRFToken": token},
+  body: JSON.stringify({title})})
+  .then(r =&gt; r.json())
+  .then(addRow)</code></pre>
+    </div>
+    <div>
+      <h4>Jongo — one file</h4>
+<pre><code><span class="kw">@server</span>
+<span class="kw">def</span> add_todo(title: str) -&gt; dict:
+    <span class="kw">return</span> Todo.create(title=title).to_dict()
+
+<span class="kw">@component</span>
+<span class="kw">def</span> TodoList(todos):
+    items = state(todos)
+
+    <span class="kw">async def</span> add(event):
+        todo = <span class="kw">await</span> add_todo(draft.value)
+        items.value = items.value + [todo]
+
+    <span class="kw">return</span> ul(
+        [li(t[<span class="st">"title"</span>], key=t[<span class="st">"id"</span>])
+         <span class="kw">for</span> t <span class="kw">in</span> items.value],
+        on_click=add,
+    )
+
+<span class="kw">@app.page</span>(<span class="st">"/todos"</span>)
+<span class="kw">def</span> todos():
+    <span class="kw">return</span> TodoList(todos=Todo.all())</code></pre>
+    </div>
+  </div>
+  <p>No template language to learn, no serializer, no CSRF plumbing, no fetch call, no build
+  tooling. The <code>await add_todo(...)</code> on the right is a real HTTP round trip that Jongo
+  generates for you.</p>
+</div>
+
+<div class="section">
+  <div class="eyebrow">2</div>
+  <h2>A whole app, annotated</h2>
+  <p class="lead">This is the example in <code>examples/todo/app.py</code>, trimmed. Nothing is hidden:
+  there is no other file.</p>
+
+<pre><code><span class="kw">from</span> jongo <span class="kw">import</span> Jongo, component, db, effect, js, server, state
+<span class="kw">from</span> jongo.html <span class="kw">import</span> *
+
+app = Jongo(__name__, title=<span class="st">"Jongo Todos"</span>, database=<span class="st">"todos.sqlite3"</span>)
+app.admin()                                   <span class="cm"># generated admin at /admin</span>
+
+
+<span class="kw">class</span> Todo(db.Model):                          <span class="cm"># ① a table</span>
+    title = db.Text(max_length=200)
+    done = db.Bool(default=<span class="kw">False</span>)
+    created = db.DateTime(auto_now_add=<span class="kw">True</span>)
+
+
+<span class="kw">@server</span>                                       <span class="cm"># ② server code the browser may call</span>
+<span class="kw">def</span> toggle_todo(todo: Todo) -&gt; dict:           <span class="cm">#    `todo: Todo` loads the row by id</span>
+    todo.done = <span class="kw">not</span> todo.done
+    todo.save()
+    <span class="kw">return</span> todo.to_dict()
+
+
+<span class="kw">@component</span>                                    <span class="cm"># ③ UI: Python now, JavaScript in the browser</span>
+<span class="kw">def</span> TodoApp(initial):
+    todos = state(initial)                     <span class="cm">#    reactive state</span>
+    show = state(<span class="st">"all"</span>)
+
+    remaining = len([t <span class="kw">for</span> t <span class="kw">in</span> todos.value <span class="kw">if</span> <span class="kw">not</span> t[<span class="st">"done"</span>])
+
+    <span class="kw">def</span> update_title():                        <span class="cm"># ④ runs in the browser after render</span>
+        js.document.title = f<span class="st">"{remaining} left"</span>
+
+    effect(update_title, [remaining])
+
+    <span class="kw">async def</span> toggle(todo):                    <span class="cm"># ⑤ an event handler that calls the server</span>
+        updated = <span class="kw">await</span> toggle_todo(todo[<span class="st">"id"</span>])
+        todos.value = [updated <span class="kw">if</span> t[<span class="st">"id"</span>] == todo[<span class="st">"id"</span>] <span class="kw">else</span> t <span class="kw">for</span> t <span class="kw">in</span> todos.value]
+
+    visible = [t <span class="kw">for</span> t <span class="kw">in</span> todos.value <span class="kw">if</span> show.value == <span class="st">"all"</span> <span class="kw">or</span> (show.value == <span class="st">"done"</span>) == t[<span class="st">"done"</span>]]
+
+    <span class="kw">return</span> section(                             <span class="cm"># ⑥ elements are just function calls</span>
+        ul([TodoItem(todo=t, on_toggle=toggle, key=t[<span class="st">"id"</span>]) <span class="kw">for</span> t <span class="kw">in</span> visible]),
+        footer(span(f<span class="st">"{remaining} left"</span>)),
+        class_=styles.card,
+    )
+
+
+<span class="kw">@app.page</span>(<span class="st">"/"</span>)                                 <span class="cm"># ⑦ route, view and page in one</span>
+<span class="kw">def</span> home():
+    <span class="kw">return</span> TodoApp(initial=Todo.all())</code></pre>
+
+  <table>
+    <tr><th style="width:8%"></th><th>What it gives you</th></tr>
+    <tr><td>①</td><td>A SQLite table. <code>jongo migrate</code> creates or alters it by comparing this class to the database — no migration files.</td></tr>
+    <tr><td>②</td><td>An HTTP endpoint that only this decorator exposes. Arguments are checked against the hints; <code>todo: Todo</code> fetches row <code>id</code> or returns 404.</td></tr>
+    <tr><td>③</td><td>A component: rendered to HTML on the server for the first paint, compiled to JavaScript for everything after.</td></tr>
+    <tr><td>④</td><td><code>effect()</code> is browser-only. It re-runs when <code>remaining</code> changes, and can return a cleanup function.</td></tr>
+    <tr><td>⑤</td><td>A real async function in the browser. The <code>await</code> is a POST with a CSRF token, JSON encoding and error handling that you never write.</td></tr>
+    <tr><td>⑥</td><td>Markup as Python: <code>class_</code>, <code>style={...}</code> dicts, <code>on_click</code> handlers, and <code>key=</code> for efficient list updates.</td></tr>
+    <tr><td>⑦</td><td>The page function runs on the server, queries the database directly, and passes plain data to the component.</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <div class="eyebrow">3</div>
+  <h2>What happens when a page loads</h2>
+  <p class="lead">Server-rendered HTML first, then the same tree wakes up in the browser.
+  Files: <code>jongo/app.py</code>, <code>jongo/vdom.py</code>, <code>jongo/compiler/dom.js</code>.</p>
+
+  <figure>
+    <svg viewBox="0 0 660 260" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica Neue, Arial" font-size="10">
+      <defs>
+        <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="#8a7f76"/>
+        </marker>
+      </defs>
+      <rect x="0" y="16" width="300" height="228" rx="8" fill="#fbf8f4" stroke="#e9e1d6"/>
+      <rect x="360" y="16" width="300" height="228" rx="8" fill="#1c1a1f"/>
+      <text x="12" y="34" fill="#8a7f76" font-size="9" letter-spacing="1.5">SERVER</text>
+      <text x="372" y="34" fill="#a89e95" font-size="9" letter-spacing="1.5">BROWSER</text>
+
+      <rect x="16" y="46" width="268" height="30" rx="5" fill="white" stroke="#e4572e"/>
+      <text x="28" y="65" fill="#211d1a">① page function runs → queries the database</text>
+
+      <rect x="16" y="86" width="268" height="30" rx="5" fill="white" stroke="#e9e1d6"/>
+      <text x="28" y="105" fill="#211d1a">② components render to a tree of VNodes</text>
+
+      <rect x="16" y="126" width="128" height="44" rx="5" fill="white" stroke="#e9e1d6"/>
+      <text x="26" y="144" fill="#211d1a">③ tree → HTML</text>
+      <text x="26" y="158" fill="#8a7f76" font-size="8.5">first paint, SEO</text>
+
+      <rect x="156" y="126" width="128" height="44" rx="5" fill="white" stroke="#e9e1d6"/>
+      <text x="166" y="144" fill="#211d1a">④ tree → JSON</text>
+      <text x="166" y="158" fill="#8a7f76" font-size="8.5">props for hydration</text>
+
+      <rect x="16" y="182" width="268" height="44" rx="5" fill="white" stroke="#e9e1d6"/>
+      <text x="26" y="200" fill="#211d1a">⑤ /_jongo/app.js — components compiled</text>
+      <text x="26" y="214" fill="#8a7f76" font-size="8.5">built once per process, cached by hash</text>
+
+      <path d="M292,140 L356,84" stroke="#8a7f76" fill="none" marker-end="url(#a)"/>
+      <path d="M292,150 L356,124" stroke="#8a7f76" fill="none" marker-end="url(#a)"/>
+      <path d="M292,200 L356,170" stroke="#8a7f76" fill="none" marker-end="url(#a)"/>
+
+      <rect x="376" y="60" width="268" height="30" rx="5" fill="#2a262d"/>
+      <text x="388" y="79" fill="#efe9e2">⑥ HTML shows instantly</text>
+
+      <rect x="376" y="100" width="268" height="44" rx="5" fill="#2a262d"/>
+      <text x="388" y="118" fill="#efe9e2">⑦ hydrate: adopt the existing DOM</text>
+      <text x="388" y="132" fill="#a89e95" font-size="8.5">attach handlers, keep the nodes</text>
+
+      <rect x="376" y="154" width="268" height="44" rx="5" fill="#2a262d" stroke="#e4572e"/>
+      <text x="388" y="172" fill="#efe9e2">⑧ state changes → re-render → patch</text>
+      <text x="388" y="186" fill="#a89e95" font-size="8.5">keyed diff, only changed nodes touched</text>
+
+      <rect x="376" y="208" width="268" height="26" rx="5" fill="#2a262d"/>
+      <text x="388" y="225" fill="#efe9e2">⑨ links: fetch next page as JSON, patch</text>
+    </svg>
+    <figcaption>One tree, two renderers. <code>jongo/vdom.py</code> renders it to HTML on the server;
+    <code>dom.js</code> renders the same shape to DOM nodes in the browser, so the two can meet in the middle.</figcaption>
+  </figure>
+
+  <h3>Why hydration instead of a single-page app</h3>
+  <p>The browser receives finished HTML, so the first paint does not wait for JavaScript, and search
+  engines and link previews see real content. The JSON copy of the tree arrives in the same document
+  in a <code>&lt;script type="application/json"&gt;</code> tag, so the browser rebuilds the component
+  tree with exactly the data the server used — no second round trip, no API to write.</p>
+
+  <h3>Navigation keeps the page alive</h3>
+  <p>Clicking an internal link does not reload the page. The router fetches the target with an
+  <code>X-Jongo-Nav</code> header, gets the tree as JSON, and patches the DOM. Your layout —
+  and any state inside it — survives. A verified example from this build: clicking "details" moved
+  from <code>/</code> to <code>/todos/2</code>, changed the title, and kept the same document alive.</p>
+</div>
+
+<div class="section">
+  <div class="eyebrow">4</div>
+  <h2>The compiler: Python to JavaScript</h2>
+  <p class="lead">The interesting part. Files: <code>jongo/compiler/transpile.py</code> (745 lines),
+  <code>scope.py</code>, <code>bundle.py</code>.</p>
+
+  <figure>
+    <svg viewBox="0 0 660 92" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica Neue, Arial" font-size="9.5">
+      <defs><marker id="b" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#e4572e"/></marker></defs>
+      <g>
+        <rect x="0" y="24" width="112" height="44" rx="6" fill="#fbf8f4" stroke="#e9e1d6"/>
+        <text x="14" y="44" fill="#211d1a">@component</text><text x="14" y="58" fill="#8a7f76" font-size="8.5">Python source</text>
+        <path d="M116,46 L138,46" stroke="#e4572e" marker-end="url(#b)"/>
+        <rect x="142" y="24" width="112" height="44" rx="6" fill="#fbf8f4" stroke="#e9e1d6"/>
+        <text x="156" y="44" fill="#211d1a">ast.parse</text><text x="156" y="58" fill="#8a7f76" font-size="8.5">+ scope analysis</text>
+        <path d="M258,46 L280,46" stroke="#e4572e" marker-end="url(#b)"/>
+        <rect x="284" y="24" width="124" height="44" rx="6" fill="#fbf8f4" stroke="#e4572e"/>
+        <text x="298" y="44" fill="#211d1a">name resolution</text><text x="298" y="58" fill="#8a7f76" font-size="8.5">against live objects</text>
+        <path d="M412,46 L434,46" stroke="#e4572e" marker-end="url(#b)"/>
+        <rect x="438" y="24" width="106" height="44" rx="6" fill="#fbf8f4" stroke="#e9e1d6"/>
+        <text x="452" y="44" fill="#211d1a">emit JS</text><text x="452" y="58" fill="#8a7f76" font-size="8.5">+ runtime shims</text>
+        <path d="M548,46 L570,46" stroke="#e4572e" marker-end="url(#b)"/>
+        <rect x="574" y="24" width="86" height="44" rx="6" fill="#1c1a1f"/>
+        <text x="588" y="44" fill="#efe9e2">app.js</text><text x="588" y="58" fill="#a89e95" font-size="8.5">one file</text>
+      </g>
+    </svg>
+  </figure>
+
+  <h3>The trick: the compiler reads live Python objects, not just text</h3>
+  <p>A transpiler that only sees source text cannot know what <code>add_todo</code> is. Jongo compiles
+  from the real function object, so it can look the name up in that function's own globals and closure
+  and see the actual value. That single decision is what makes the API feel seamless:</p>
+
+  <table>
+    <tr><th style="width:38%">What the name turns out to be</th><th>What the compiler emits</th></tr>
+    <tr><td>a <code>@server</code> function</td><td>an RPC stub that POSTs to <code>/_jongo/rpc/&lt;id&gt;</code></td></tr>
+    <tr><td>another <code>@component</code></td><td>that component, compiled too (recursively)</td></tr>
+    <tr><td>a plain helper function in your project</td><td>the function, compiled</td></tr>
+    <tr><td>an HTML tag like <code>div</code></td><td>the element factory from the runtime</td></tr>
+    <tr><td>a stylesheet from <code>css(...)</code></td><td>the generated class names, inlined as data</td></tr>
+    <tr><td>a constant (list, dict, number)</td><td>the value, inlined as JSON</td></tr>
+    <tr><td>a database model</td><td><span class="loss">a compile error</span> — with the advice to load it in the page function or a <code>@server</code> function</td></tr>
+    <tr><td>a stdlib module that can't run in a browser</td><td><span class="loss">a compile error</span> naming the module and suggesting <code>@server</code> or <code>js.*</code></td></tr>
+  </table>
+
+  <h3>Real input, real output</h3>
+  <p>This is genuine output from <code>jongo/compiler</code>, not an illustration:</p>
+  <div class="two">
+    <div>
+      <h4>You write</h4>
+<pre><code><span class="kw">@component</span>
+<span class="kw">def</span> Greeting(name, greeting=<span class="st">"Hello"</span>):
+    clicks = state(0)
+
+    <span class="kw">async def</span> click(event):
+        <span class="kw">await</span> save(name)
+        clicks.value += 1
+
+    <span class="kw">return</span> div(
+        h1(f<span class="st">"{greeting}, {name}!"</span>),
+        button(f<span class="st">"Clicked {clicks.value} times"</span>,
+               on_click=click),
+        ul([li(word.upper())
+            <span class="kw">for</span> word <span class="kw">in</span> name.split() <span class="kw">if</span> word]),
+        class_=<span class="st">"card"</span>,
+    )</code></pre>
+    </div>
+    <div>
+      <h4>Jongo generates</h4>
+<pre><code><span class="cm">// the @server function became a stub</span>
+const rpc__save = $rpc("sample.save", false);
+
+const Greeting = $component("sample.Greeting",
+ $fn(function Greeting(name, greeting = "Hello") {
+  let click, clicks;
+  clicks = $state(0);
+  click = $fn(async function click(event) {
+    (await rpc__save(name));
+    const $t1 = clicks;
+    $t1.value = $iadd($t1.value, 1);
+  }, ["event"]);
+  return $call($h("div"), [
+    $h("h1")(`${$str(greeting)}, ${$str(name)}!`),
+    $call($h("button"),
+      [`Clicked ${$str(clicks.value)} times`],
+      {"on_click": click}),
+    $h("ul")((($i) =&gt; { const $r = [];
+      for (const word of $iter($i)) {
+        if (!$t(word)) continue;
+        $r.push($h("li")($m(word, "upper", [])));
+      } return $r; })($m(name, "split", [])))
+  ], {"class_": "card"});
+ }, ["name", "greeting"]));</code></pre>
+    </div>
+  </div>
+
+  <h3>Python semantics, kept</h3>
+  <p>Those <code>$</code> helpers exist because JavaScript disagrees with Python in ways that would
+  otherwise cause silent bugs. <code>pyrt.js</code> restores the Python behaviour:</p>
+  <table>
+    <tr><th style="width:30%">Expression</th><th style="width:23%">Plain JavaScript</th><th style="width:20%">Python</th><th>Jongo</th></tr>
+    <tr><td><code>if []:</code></td><td>truthy 😬</td><td>falsy</td><td class="win">falsy</td></tr>
+    <tr><td><code>[1] + [2]</code></td><td><code>"12"</code> 😬</td><td><code>[1, 2]</code></td><td class="win"><code>[1, 2]</code></td></tr>
+    <tr><td><code>xs[-1]</code></td><td><code>undefined</code></td><td>last item</td><td class="win">last item</td></tr>
+    <tr><td><code>-7 // 2</code></td><td><code>-3.5</code></td><td><code>-4</code></td><td class="win"><code>-4</code></td></tr>
+    <tr><td><code>{"a":1} == {"a":1}</code></td><td><code>false</code></td><td><code>True</code></td><td class="win"><code>True</code></td></tr>
+    <tr><td><code>d["missing"]</code></td><td><code>undefined</code></td><td><code>KeyError</code></td><td class="win"><code>KeyError</code></td></tr>
+    <tr><td><code>", ".join(xs)</code></td><td>no such method</td><td>works</td><td class="win">works</td></tr>
+    <tr><td><code>f"{x:,.2f}"</code></td><td>no format specs</td><td>works</td><td class="win">works</td></tr>
+  </table>
+  <p>This is enforced, not hoped for: <code>tests/test_compiler.py</code> runs a suite of sample
+  functions in Python and in Node and fails unless the results are identical, covering arithmetic,
+  strings, lists, dicts, comprehensions, exceptions, closures and calling conventions.</p>
+
+  <div class="note">
+    <strong>One deliberate improvement on Python.</strong> In Python, closures made in a loop all see
+    the last value — the classic <code>lambda: i</code> bug. Because event handlers in loops are the
+    single most common place this bites, Jongo compiles loop variables to per-iteration bindings when
+    they're only used inside the loop. <code>button(on_click=lambda e: remove(todo))</code> inside a
+    <code>for</code> loop does what you meant. There's a test that pins this behaviour.
+  </div>
+
+  <h3>What doesn't compile</h3>
+  <p>Classes, <code>with</code> blocks, imports inside functions, generators and the parts of the
+  standard library that assume a filesystem. You get a compile error at startup, naming the file and
+  line, with a hint — not a mystery at runtime. Everything else stays on the server, where it belongs.</p>
+</div>
+
+<div class="section">
+  <div class="eyebrow">5</div>
+  <h2>The browser runtime</h2>
+  <p class="lead">1,476 lines, no dependencies, no build step. Files: <code>pyrt.js</code> (Python
+  semantics, 780 lines) and <code>dom.js</code> (UI, 696 lines).</p>
+
+  <table>
+    <tr><th style="width:26%">Piece</th><th>What it does</th></tr>
+    <tr><td>Virtual DOM</td><td>The same node shape the server uses. Elements, text and components in one tree.</td></tr>
+    <tr><td>Hydration</td><td>Walks the server's HTML and adopts it instead of rebuilding: no flash, no double render. Mismatches fall back to replacing that node and warn in dev.</td></tr>
+    <tr><td>Keyed diffing</td><td>Reorders existing DOM nodes by <code>key=</code>, so inputs keep focus and rows aren't recreated.</td></tr>
+    <tr><td>Hooks</td><td><code>state</code>, <code>effect</code>, <code>ref</code> — per component instance, with cleanup on unmount.</td></tr>
+    <tr><td>Scheduling</td><td>State changes mark components dirty and re-render once per microtask, parents before children, so ten updates in one handler cost one render.</td></tr>
+    <tr><td>Events</td><td>One listener per element per event type, swapped in place. Submit handlers get <code>preventDefault()</code> automatically.</td></tr>
+    <tr><td>Router</td><td>Intercepts same-origin links, fetches the page as JSON, patches, handles Back/Forward, and falls back to a normal load if anything is off.</td></tr>
+    <tr><td>RPC</td><td>Wraps <code>@server</code> functions: CSRF header, JSON, error translation into a catchable <code>ServerError</code>, redirects, optional page refresh.</td></tr>
+    <tr><td>Dev tools</td><td>Live reload over server-sent events, plus an on-page error overlay.</td></tr>
+  </table>
+
+  <p>For comparison: React plus ReactDOM is roughly 140 KB before you add a router, a data layer or a
+  build pipeline. The entire Jongo bundle for the example app — runtime plus every compiled component
+  — is 57 KB uncompressed, served as one file with no toolchain.</p>
+</div>
+
+<div class="section">
+  <div class="eyebrow">6</div>
+  <h2>Server functions</h2>
+  <p class="lead">The bridge that removes your API layer. File: <code>jongo/rpc.py</code>.</p>
+
+<pre><code><span class="kw">@server</span>(login_required=<span class="kw">True</span>)
+<span class="kw">def</span> rename(request, todo: Todo, title: str) -&gt; dict:
+    todo.title = title
+    todo.save()
+    <span class="kw">return</span> todo.to_dict()</code></pre>
+
+  <p>In a component you write <code>await rename(todo_id, "New title")</code>. Between those two lines
+  Jongo does the work you would otherwise write by hand:</p>
+  <ol>
+    <li>POSTs JSON to a generated endpoint, with the CSRF token attached.</li>
+    <li>Rejects the call if the user isn't logged in (or isn't an admin).</li>
+    <li>Binds the arguments to your signature and checks each one against its type hint.</li>
+    <li>Turns <code>todo: Todo</code> into a loaded row, or a 404 if it doesn't exist.</li>
+    <li>Serialises the result, converting models, dates and decimals to JSON.</li>
+    <li>Raises a catchable <code>ServerError</code> in the browser on failure, carrying field errors.</li>
+  </ol>
+
+  <h4>Security by construction</h4>
+  <ul>
+    <li>Only decorated functions are reachable. There is no generic "call any function" endpoint.</li>
+    <li>Every unsafe request needs a CSRF token; cross-origin requests are refused.</li>
+    <li>Arguments are validated before your code runs, so <code>title: str</code> can't arrive as a dict.</li>
+    <li>Text is HTML-escaped on both sides; <code>raw()</code> is the one explicit escape hatch.</li>
+    <li><code>User.to_dict()</code> drops the password hash, so it can't leak into a page's props.</li>
+  </ul>
+
+  <div class="note">
+    <strong>Compare with Django REST Framework.</strong> The same feature there is a serializer class,
+    a viewset, a router entry, and a <code>fetch()</code> in JavaScript that duplicates the argument
+    names. That's four places to keep in sync, in two languages, and the type checker can't see across
+    the gap. Here the signature <em>is</em> the contract.
+  </div>
+</div>
+
+<div class="section">
+  <div class="eyebrow">7</div>
+  <h2>Models and migrations</h2>
+  <p class="lead">Familiar querying, and schema changes without a directory of migration files.
+  Files: <code>jongo/db/</code> (2,258 lines).</p>
+
+<pre><code><span class="kw">class</span> Book(db.Model):
+    title = db.Text(max_length=200)
+    author = db.ForeignKey(Author, related_name=<span class="st">"books"</span>)
+    published = db.Date(null=<span class="kw">True</span>)
+
+Book.filter(author__name__icontains=<span class="st">"le guin"</span>, published__gte=date(1970, 1, 1))[:10]
+Book.filter(db.Q(title__startswith=<span class="st">"The"</span>) | db.Q(tags__contains=<span class="st">"classic"</span>)).count()
+author.books.create(title=<span class="st">"The Dispossessed"</span>)</code></pre>
+
+  <p>If you know Django's ORM you already know this one: managers, chainable lazy querysets,
+  <code>__</code> lookups that traverse relations, <code>Q</code> objects, transactions with savepoints.</p>
+
+  <h3>Migrations without files</h3>
+  <table>
+    <tr><th style="width:50%">Django</th><th>Jongo</th></tr>
+    <tr><td>Two commands: <code>makemigrations</code>, then <code>migrate</code></td><td>One: <code>jongo migrate</code></td></tr>
+    <tr><td>A numbered file per change, committed to git</td><td>No files. The live schema is read back and compared to your models</td></tr>
+    <tr><td>Merge conflicts between branches that both add migrations</td><td>Nothing to conflict over</td></tr>
+    <tr><td>Destructive edits happen because a file said so</td><td>Dropping a column requires <code>--allow-destructive</code>; safe changes apply on their own in dev</td></tr>
+    <tr><td><code>sqlmigrate</code> to preview</td><td><code>jongo migrate --plan</code> prints the exact SQL first</td></tr>
+  </table>
+  <p>It creates tables, adds columns and indexes, and rebuilds a table when a column's type or
+  nullability changes, copying the data across. Running it twice does nothing the second time.</p>
+
+  <div class="note">
+    <strong>The honest trade-off.</strong> Migration files are also a <em>history</em>, and a place to
+    put data migrations ("split this column into two"). Jongo's approach is better for the common case
+    of moving fast on one database, and weaker when you need a reviewed, replayable schema history
+    across many environments. Right now it also only speaks SQLite.
+  </div>
+</div>
+
+<div class="section">
+  <div class="eyebrow">8</div>
+  <h2>Batteries: auth, admin, dev server</h2>
+
+  <h3>Auth</h3>
+  <p>A <code>User</code> model with PBKDF2-SHA256 password hashing, <code>authenticate</code>,
+  <code>login</code>, <code>logout</code>, and <code>request.user</code> everywhere — pages, routes and
+  server functions. Sessions are HMAC-signed cookies, so there's no session table to clean up.
+  Changing a password invalidates that user's other sessions, which is a nice property Django needs
+  extra care to get.</p>
+
+  <h3>The admin</h3>
+  <p>Like Django's: <code>app.admin()</code> mounts a site at <code>/admin</code> that lists, searches,
+  sorts, creates, edits and deletes rows for every model, building each form from your field types —
+  checkboxes for booleans, dropdowns for foreign keys and choices, date pickers for dates. Passwords
+  get a proper "set password" field and never display the hash. Create the first account with
+  <code>jongo createadmin</code>.</p>
+
+  <h3>The dev server</h3>
+  <ul>
+    <li>Save a file and the server restarts <em>and</em> the open browser tab reloads itself.</li>
+    <li>Errors render a debug page with the traceback, your source in context, and the request.</li>
+    <li>Compile errors appear at startup with file, line and a hint.</li>
+    <li>Browser exceptions surface in an on-page overlay instead of only the console.</li>
+    <li>Safe schema changes apply automatically as you edit your models.</li>
+  </ul>
+
+  <h3>Testing</h3>
+<pre><code>client = app.test_client()
+assert client.get(<span class="st">"/"</span>).status == 200
+todo = client.rpc(add_todo, <span class="st">"Write tests"</span>)      <span class="cm"># full round trip, CSRF included</span>
+assert client.navigate(<span class="st">"/todos"</span>)[<span class="st">"title"</span>] == <span class="st">"Todos"</span>  <span class="cm"># what the router would fetch</span></code></pre>
+</div>
+
+<div class="section">
+  <div class="eyebrow">9</div>
+  <h2>Jongo vs Django, honestly</h2>
+
+  <h3>Where Jongo is better</h3>
+  <table>
+    <tr><th style="width:24%">Area</th><th style="width:38%">Django</th><th>Jongo</th></tr>
+    <tr><td>Frontend</td><td>Not its problem. You add a template language, then JavaScript, then a bundler.</td><td class="win">Written in Python, compiled to JS, rendered on the server first.</td></tr>
+    <tr><td>Feature layout</td><td>Split across 4–6 files by type.</td><td class="win">One file, one feature.</td></tr>
+    <tr><td>Calling the server</td><td>DRF serializer + viewset + URL + fetch.</td><td class="win"><code>await your_function(...)</code></td></tr>
+    <tr><td>Validation</td><td>Form or serializer classes that restate the model.</td><td class="win">Type hints on the function.</td></tr>
+    <tr><td>Migrations</td><td>Generated files, merge conflicts.</td><td class="win">Diff against the live schema; destructive steps opt-in.</td></tr>
+    <tr><td>Build step</td><td>collectstatic, npm, a bundler, source maps.</td><td class="win">None. One generated JS file.</td></tr>
+    <tr><td>Dependencies</td><td>Django plus whatever the frontend needs.</td><td class="win">Zero. Standard library only.</td></tr>
+    <tr><td>Page transitions</td><td>Full reloads unless you add HTMX or a SPA.</td><td class="win">Built-in: fetch the tree, patch the DOM, keep layout state.</td></tr>
+    <tr><td>Type safety across the wire</td><td>Impossible: Python one side, JS the other.</td><td class="win">One language, one signature, checked at the boundary.</td></tr>
+    <tr><td>Learning surface</td><td>Python + templates + JS + a frontend framework.</td><td class="win">Python.</td></tr>
+  </table>
+
+  <h3>Where Django is still better</h3>
+  <table>
+    <tr><th style="width:24%">Area</th><th>Reality</th></tr>
+    <tr><td>Maturity</td><td>Twenty years of production use and security review. Jongo is two days old and version 0.1.</td></tr>
+    <tr><td>Databases</td><td>PostgreSQL, MySQL, Oracle, plus connection pooling. Jongo: SQLite only.</td></tr>
+    <tr><td>Ecosystem</td><td>Thousands of packages — payments, CMS, search, social auth. Jongo has none.</td></tr>
+    <tr><td>Scale features</td><td>Caching layers, async views, channels/WebSockets, i18n, time zones, permissions and groups.</td></tr>
+    <tr><td>Migration history</td><td>Reviewable, replayable, with data migrations.</td></tr>
+    <tr><td>Hiring and answers</td><td>Every question has a Stack Overflow answer; Django developers are easy to find.</td></tr>
+  </table>
+
+  <p><strong>The fair summary:</strong> Jongo is better at the thing Django never tried to do — making
+  the interactive frontend part of the same Python codebase — and it modernises a few backend habits
+  along the way. Django remains the safer choice for a large team shipping a decade-long product on
+  PostgreSQL. Jongo is the better choice for building something quickly, alone or in a small team,
+  without the Python/JavaScript split.</p>
+</div>
+
+<div class="section">
+  <div class="eyebrow">10</div>
+  <h2>By the numbers</h2>
+
+  <div class="stat">
+    <div><strong>6,662</strong><span>lines of Python</span></div>
+    <div><strong>1,476</strong><span>lines of browser runtime</span></div>
+    <div><strong>117</strong><span>tests, all passing</span></div>
+    <div><strong>0</strong><span>dependencies</span></div>
+  </div>
+
+  <table>
+    <tr><th style="width:42%">Area</th><th style="width:18%">Lines</th><th>What lives there</th></tr>
+    <tr><td><code>jongo/compiler/transpile.py</code></td><td>745</td><td>Python AST → JavaScript</td></tr>
+    <tr><td><code>jongo/compiler/pyrt.js</code></td><td>780</td><td>Python semantics in the browser</td></tr>
+    <tr><td><code>jongo/compiler/dom.js</code></td><td>696</td><td>Virtual DOM, hooks, router, RPC</td></tr>
+    <tr><td><code>jongo/db/</code></td><td>2,258</td><td>ORM, queries, fields, auto-migrations</td></tr>
+    <tr><td><code>jongo/vdom.py</code></td><td>515</td><td>The tree, server rendering, JSON bridge</td></tr>
+    <tr><td><code>jongo/app.py</code></td><td>492</td><td>Routing, pages, RPC endpoint, sessions, errors</td></tr>
+    <tr><td><code>jongo/admin.py</code></td><td>486</td><td>The generated admin site</td></tr>
+    <tr><td><code>jongo/http.py</code></td><td>399</td><td>Requests, responses, cookies, signed sessions</td></tr>
+    <tr><td>tests</td><td>1,860</td><td>ORM, compiler parity in Node, web layer, admin</td></tr>
+  </table>
+
+  <p>Tested three ways: unit tests for the ORM; parity tests that run the same functions in Python and
+  Node and demand identical answers; and end-to-end tests through an in-process HTTP client. On top of
+  that, the example app was driven in a real Chrome browser — adding, toggling, filtering, deleting,
+  navigating, and a timer with its cleanup — which is how three real bugs were found and fixed.</p>
+</div>
+
+<div class="section">
+  <div class="eyebrow">11</div>
+  <h2>Limits, and what's next</h2>
+
+  <h4>Known limits today</h4>
+  <ul>
+    <li><strong>SQLite only.</strong> PostgreSQL is the obvious next adapter.</li>
+    <li><strong>No classes in browser code.</strong> Components use functions, state and dicts.</li>
+    <li><strong>No WebSockets.</strong> Live updates today mean polling or a refresh after a server call.</li>
+    <li><strong>No memoisation.</strong> A state change re-renders that component's subtree; fine for
+        pages of ordinary size, wasteful for very large lists.</li>
+    <li><strong>One bundle.</strong> Every component ships to every page; no code splitting yet.</li>
+    <li><strong>Young.</strong> Version 0.1, written in two days, not yet used in anger.</li>
+  </ul>
+
+  <h4>Natural next steps</h4>
+  <ul>
+    <li>A PostgreSQL adapter, then connection pooling.</li>
+    <li>Per-page bundles, so a big app doesn't ship everything everywhere.</li>
+    <li>WebSockets, so <code>state()</code> can follow the server.</li>
+    <li>Sourcemaps back to the Python line, so browser stack traces point at your source.</li>
+    <li>A component memo hook, and streaming server rendering.</li>
+    <li>File uploads to storage backends, background jobs, an email helper.</li>
+  </ul>
+</div>
+
+<div class="section">
+  <div class="eyebrow">12</div>
+  <h2>Cheat sheet and file map</h2>
+
+  <h3>Commands</h3>
+  <table>
+    <tr><th style="width:38%">Command</th><th>What it does</th></tr>
+    <tr><td><code>jongo new mysite</code></td><td>Create a project from the starter template</td></tr>
+    <tr><td><code>jongo dev [--port 8000]</code></td><td>Dev server: restarts on save, reloads the browser, debug pages</td></tr>
+    <tr><td><code>jongo run --migrate</code></td><td>Production server (or point gunicorn at <code>app:app</code>)</td></tr>
+    <tr><td><code>jongo migrate --plan</code></td><td>Show the SQL needed to match your models</td></tr>
+    <tr><td><code>jongo createadmin</code></td><td>Create an admin user</td></tr>
+    <tr><td><code>jongo routes</code></td><td>List every route</td></tr>
+    <tr><td><code>jongo shell</code></td><td>Python shell with your models loaded</td></tr>
+    <tr><td><code>jongo build</code></td><td>Compile all components and fail on errors — for CI</td></tr>
+  </table>
+
+  <h3>Where to look in VS Code</h3>
+  <table>
+    <tr><th style="width:38%">File</th><th>Read it for</th></tr>
+    <tr><td><code>examples/todo/app.py</code></td><td>The whole idea, in one file. Start here.</td></tr>
+    <tr><td><code>jongo/vdom.py</code></td><td>What a component is, hooks, server rendering, the JSON bridge</td></tr>
+    <tr><td><code>jongo/app.py</code></td><td>A request's journey: routing → page → HTML, plus the RPC endpoint</td></tr>
+    <tr><td><code>jongo/compiler/transpile.py</code></td><td>The Python-to-JavaScript translation, statement by statement</td></tr>
+    <tr><td><code>jongo/compiler/bundle.py</code></td><td>How a name becomes an RPC stub, a component or an error</td></tr>
+    <tr><td><code>jongo/compiler/dom.js</code></td><td>Hydration, diffing, hooks and the router in the browser</td></tr>
+    <tr><td><code>jongo/rpc.py</code></td><td>Argument validation and the type-hint rules</td></tr>
+    <tr><td><code>jongo/db/models.py</code></td><td>The model metaclass and field descriptors</td></tr>
+    <tr><td><code>jongo/db/migrate.py</code></td><td>Schema diffing and table rebuilds</td></tr>
+    <tr><td><code>tests/test_compiler.py</code></td><td>The Python/JavaScript parity suite — a good spec of the supported subset</td></tr>
+  </table>
+
+  <p class="footer-note" style="margin-top:18pt;">Jongo 0.1 · built 15–17 September 2026 ·
+  <code>~/jongo</code> · local git repository, nothing published · this document lives at
+  <code>docs/jongo-guide.html</code> and <code>docs/jongo-guide.pdf</code>.</p>
+</div>
+
+</body>
+</html>
