@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.3
+
+**Relicensed from MIT to AGPL-3.0-or-later.** Jongo is now copyleft: it is free to
+use, study and fork, but any modified version — including one offered to users over a
+network — must make its complete source available under the same license. This protects
+the project from being taken into closed, proprietary products. Copyright © 2026 Joshua
+Harty. See `LICENSE`. (Versions 0.1.0–0.2.2 remain available under their original MIT terms.)
+
+No code changes in this release.
+
 ## 0.2.2
 
 A second stress-audit pass: 27 fixes (of 32 findings; the other 5 are documented as
