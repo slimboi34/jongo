@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jongo"
-version = "0.2.2"
+version = "0.2.3"
 description = "A full-stack Python web framework: routes, server code and reactive UI in one language."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "Joshua Harty" }]
 keywords = ["web", "framework", "fullstack", "frontend", "orm", "wsgi", "transpiler", "ssr"]
 dependencies = []
@@ -16,7 +16,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Web Environment",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
