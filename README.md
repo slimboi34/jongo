@@ -310,3 +310,13 @@ Version 0.2 — 0.1 hardened over two stress-audit passes (see `CHANGELOG.md`). 
 - Browser (post-hydration) code inherits JavaScript's value model, so a few things differ from CPython (the server is always correct): integers past 2⁵³ lose precision and `str(2.0)` shows `"2"` (one number type — format explicitly, e.g. `f"{x:.2f}"`); a dict keyed by ints iterates string keys; `len("😀")` counts UTF-16 units; `(1,2) == [1,2]` is true. Do exact numeric/big-integer work in a `@server` function.
 
 Bug reports and ideas are welcome.
+
+## License
+
+Jongo is Copyright © 2026 Joshua Harty, and is licensed under the **GNU Affero General
+Public License v3.0 or later** (AGPL-3.0-or-later) — see [LICENSE](LICENSE). You are free
+to use, study, share and modify it, but any modified version you distribute or make
+available to users over a network must also be released, in full source form, under the
+AGPL. This keeps Jongo open and prevents it from being folded into closed, proprietary
+products. Versions 0.1.0–0.2.2 were released under the MIT License and remain available
+under those terms.
