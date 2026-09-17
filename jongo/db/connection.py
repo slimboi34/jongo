@@ -168,26 +168,13 @@ def locked() -> Iterator[sqlite3.Connection]:
         yield get_connection()
 
 
-_CONTROL = {"BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "PRAGMA", "END"}
-
-
-def _account(statement: str, ms: float, rows: int | None) -> None:
-    """Log one SQL statement and count data queries against the current request."""
-    _jlog.sql(statement, ms, rows)
-    head = statement.lstrip().split(None, 1)[0].upper() if statement.strip() else ""
-    if head not in _CONTROL:
-        _jlog.record_sql(ms)
-
-
 def execute(sql: str, params: Sequence[Any] | dict = ()) -> sqlite3.Cursor:
-    """Execute one SQL statement and return the cursor."""
+    """Execute one SQL statement and return the cursor.
+
+    Data-modifying statements are timed and logged by ``_Connection.execute``.
+    """
     with locked() as conn:
-        if not _jlog.sql_enabled():
-            return conn.execute(sql, params)
-        t0 = time.perf_counter()
-        cursor = conn.execute(sql, params)
-        _account(sql, (time.perf_counter() - t0) * 1000, cursor.rowcount if cursor.rowcount >= 0 else None)
-        return cursor
+        return conn.execute(sql, params)
 
 
 def fetch(sql: str, params: Sequence[Any] | dict = ()) -> list[sqlite3.Row]:
@@ -197,7 +184,9 @@ def fetch(sql: str, params: Sequence[Any] | dict = ()) -> list[sqlite3.Row]:
             return conn.execute(sql, params).fetchall()
         t0 = time.perf_counter()
         rows = conn.execute(sql, params).fetchall()
-        _account(sql, (time.perf_counter() - t0) * 1000, len(rows))
+        ms = (time.perf_counter() - t0) * 1000
+        _jlog.sql(sql, ms, len(rows))
+        _jlog.record_sql(ms)
         return rows
 
 
