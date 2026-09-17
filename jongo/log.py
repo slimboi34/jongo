@@ -201,7 +201,8 @@ class PrettyFormatter(logging.Formatter):
     def _request_line(self, kv: dict) -> str:
         status = kv["status"]
         arrow = self._c(f"→ {status}", _STATUS_STYLE.get(status // 100, _DIM))
-        out = f"{kv['method']} {kv['path']}  {arrow}   {self._c(f'{kv[\"ms\"]}ms', _DIM)}"
+        timing = self._c(f"{kv['ms']}ms", _DIM)
+        out = f"{kv['method']} {kv['path']}  {arrow}   {timing}"
         if kv.get("sql"):
             out += self._c(f"  sql={kv['sql']}·{kv['sql_ms']}ms", _DIM)
         if kv.get("route"):
