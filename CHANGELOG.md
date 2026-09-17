@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.1
+
+Observability: a first-class logging system for humans *and* AI agents. No wiring
+in your app required — the dev server, request lifecycle and SQL layer emit
+through it automatically.
+
+### Added
+
+- **`jongo.log` — one clear, beautiful log stream.** Zero-dependency (stdlib
+  `logging` + `contextvars` + ANSI). A **pretty** formatter (aligned columns:
+  time · level · domain · a colour-coded per-request id · message · `key=value`)
+  for humans, and a **json** formatter (one object per line) for machine/agent
+  consumers. Auto-selects pretty on a TTY, json when piped; override with
+  `JONGO_LOG=pretty|json|plain` and `JONGO_LOG_LEVEL`.
+- **Request correlation.** Every line emitted while handling a request carries a
+  short request id, so one request's whole lifecycle reads together.
+- **Per-domain loggers** (`jongo.http/sql/rpc/render/compile/server`).
+- **SQL visibility.** Each query logs with timing (DEBUG); the request summary
+  rolls up `sql=N·Xms`, so an N+1 shows up at a glance.
+- **App-frame-highlighted tracebacks** on unhandled errors, pointing at the
+  offending source line.
+
+### Changed
+
+- The dev server, request lifecycle and SQL layer emit through `jongo.log`
+  (`server.py`, `app.py`, `db/connection.py`); production (WARNING) pays no
+  per-query timing overhead, plus a tidier start-up banner.
+
 ## 0.2.0
 
 A correctness-and-security release from a stress audit of 0.1.0. Every fix ships with a

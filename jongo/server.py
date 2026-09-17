@@ -57,13 +57,8 @@ class _RequestHandler(WSGIRequestHandler):
 
 
 def setup_logging(dev: bool):
-    if logging.getLogger().handlers or log.handlers:
-        return
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter(color("jongo", "38;5;209") + "  %(message)s"))
-    log.addHandler(handler)
-    log.setLevel(logging.INFO if dev else logging.WARNING)
-    log.propagate = False
+    from . import log as _log
+    _log.configure(dev)
 
 
 def auto_migrate(allow_destructive=False) -> None:
@@ -97,9 +92,9 @@ def serve(app, host="127.0.0.1", port=8000, *, migrate=None):
             raise SystemExit(1) from None
         raise
     server.set_app(app)
-    mode = color("dev", "38;5;209") if app.dev else color("production", "32")
+    from . import log as _log
     url = f"http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{port}"
-    sys.stderr.write(f"\n  {color('Jongo', '1')} {mode} server running at {color(url, '4')}\n  Press Ctrl+C to stop.\n\n")
+    sys.stderr.write(_log.banner(app.name, "dev" if app.dev else "production", url, color=sys.stderr.isatty()))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

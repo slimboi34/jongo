@@ -5,10 +5,13 @@ from __future__ import annotations
 import itertools
 import os
 import sqlite3
+import time
 import threading
 import weakref
 from contextlib import ContextDecorator, contextmanager
 from typing import Any, Callable, Iterator, Sequence
+
+from .. import log as _jlog
 
 MEMORY = ":memory:"
 DEFAULT_DATABASE = "db.sqlite3"
@@ -139,16 +142,37 @@ def locked() -> Iterator[sqlite3.Connection]:
         yield get_connection()
 
 
+_CONTROL = {"BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "PRAGMA", "END"}
+
+
+def _account(statement: str, ms: float, rows: int | None) -> None:
+    """Log one SQL statement and count data queries against the current request."""
+    _jlog.sql(statement, ms, rows)
+    head = statement.lstrip().split(None, 1)[0].upper() if statement.strip() else ""
+    if head not in _CONTROL:
+        _jlog.record_sql(ms)
+
+
 def execute(sql: str, params: Sequence[Any] | dict = ()) -> sqlite3.Cursor:
     """Execute one SQL statement and return the cursor."""
     with locked() as conn:
-        return conn.execute(sql, params)
+        if not _jlog.sql_enabled():
+            return conn.execute(sql, params)
+        t0 = time.perf_counter()
+        cursor = conn.execute(sql, params)
+        _account(sql, (time.perf_counter() - t0) * 1000, cursor.rowcount if cursor.rowcount >= 0 else None)
+        return cursor
 
 
 def fetch(sql: str, params: Sequence[Any] | dict = ()) -> list[sqlite3.Row]:
     """Execute a query and return all rows (fetched while holding the lock)."""
     with locked() as conn:
-        return conn.execute(sql, params).fetchall()
+        if not _jlog.sql_enabled():
+            return conn.execute(sql, params).fetchall()
+        t0 = time.perf_counter()
+        rows = conn.execute(sql, params).fetchall()
+        _account(sql, (time.perf_counter() - t0) * 1000, len(rows))
+        return rows
 
 
 def query(sql: str, params: Sequence[Any] | dict = ()) -> list[dict[str, Any]]:

@@ -18,6 +18,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import vdom
+from . import log as jlog
 from .errors import CompileError, HTTPError, NotFound
 from .http import (
     CSRF_COOKIE,
@@ -168,27 +169,29 @@ class Jongo:
 
     def handle(self, request: Request) -> Response:
         started = time.perf_counter()
-        try:
-            self._load_session(request)
-            response = None
-            for hook in self.before_request_hooks:
-                result = hook(request)
-                if result is not None:
-                    response = self.to_response(result, request)
-                    break
-            if response is None:
-                response = self._dispatch(request)
-        except HTTPError as exc:
-            response = self.http_error(request, exc)
-        except Exception as exc:
-            response = self.server_error(request, exc)
-        for hook in self.after_request_hooks:
-            response = hook(request, response) or response
-        self._finish(request, response)
-        if self.dev and not request.path.startswith("/_jongo/"):
-            elapsed = (time.perf_counter() - started) * 1000
-            log.info("%s %s -> %s (%.1f ms)", request.method, request.full_path, response.status, elapsed)
-        return response
+        with jlog.request_scope():
+            try:
+                self._load_session(request)
+                response = None
+                for hook in self.before_request_hooks:
+                    result = hook(request)
+                    if result is not None:
+                        response = self.to_response(result, request)
+                        break
+                if response is None:
+                    response = self._dispatch(request)
+            except HTTPError as exc:
+                response = self.http_error(request, exc)
+            except Exception as exc:
+                response = self.server_error(request, exc)
+            for hook in self.after_request_hooks:
+                response = hook(request, response) or response
+            self._finish(request, response)
+            if self.dev and not (request.path.startswith("/_jongo/app") or request.path == "/_jongo/live"):
+                elapsed = (time.perf_counter() - started) * 1000
+                route_name = getattr(getattr(request, "route", None), "name", None)
+                jlog.request_done(request.method, request.full_path, response.status, elapsed, route=route_name)
+            return response
 
     def _dispatch(self, request: Request) -> Response:
         route, params = self.router.match(request.method, request.path)
@@ -381,7 +384,7 @@ class Jongo:
         return Response(http_error_page(exc), exc.status, headers)
 
     def server_error(self, request: Request, exc: Exception) -> Response:
-        log.error("error handling %s %s\n%s", request.method, request.full_path, "".join(traceback.format_exception(exc)))
+        jlog.get_logger("http").error("error handling %s %s", request.method, request.full_path, exc_info=exc)
         if request.path.startswith("/_jongo/rpc/"):
             error = {"type": type(exc).__name__, "message": str(exc) if self.dev else "Server error"}
             if self.dev:
