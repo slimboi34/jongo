@@ -67,7 +67,7 @@ In Django, one feature is spread across `models.py`, `urls.py`, `views.py`, a te
 ## Quick start
 
 ```bash
-pip install -e path/to/jongo      # Python 3.10+
+pip install jongo                 # Python 3.10+
 jongo new mysite
 cd mysite
 jongo dev
