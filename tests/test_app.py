@@ -152,6 +152,33 @@ def test_rpc_model_argument(client):
     assert err.value.status == 404
 
 
+def test_unresolvable_hints_never_silently_disable_validation(client):
+    """A server function whose annotations can't be resolved must not accept raw input.
+
+    ``get_type_hints`` raises for an annotation naming something it cannot see — a model
+    class defined inside a function, for instance. Falling back to "no hints" would hand
+    the function unvalidated browser input, and a parameter meant to receive a loaded row
+    would receive whatever id the browser sent.
+    """
+    from jongo.errors import JongoError
+    from jongo.rpc import server as server_decorator
+
+    def local_model_hint(request, note: "Note", title: str) -> dict:
+        return {"loaded": type(note).__name__, "title": title}
+
+    resolved = server_decorator(local_model_hint)
+    assert resolved.hints["note"] is Note, "a model must resolve through the registry"
+
+    def unknowable(request, thing: NoSuchTypeAnywhere) -> dict:  # noqa: F821
+        return {}
+
+    broken = server_decorator(unknowable)
+    with pytest.raises(JongoError) as err:
+        broken.hints
+    assert "can't resolve the type" in str(err.value)
+    assert "thing" in str(err.value)
+
+
 def test_rpc_requires_csrf_token(client):
     client.get("/")
     response = client.post(f"/_jongo/rpc/{add_note.id}", json={"args": ["x"]}, headers={"X-CSRF-Token": "forged"})

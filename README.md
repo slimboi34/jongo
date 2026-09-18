@@ -54,6 +54,18 @@ def home():
 jongo dev    # → http://localhost:8000, reloads when you save
 ```
 
+## Documentation
+
+- **[The guide](docs/guide.md)** — the long version: the request model, routing, components,
+  every hook, server functions, the ORM, migrations, PostgreSQL, channels, auth, security,
+  testing, deployment, exactly what compiles to the browser, and a troubleshooting table.
+- **[Patterns](examples/patterns/)** — thirteen complete, runnable apps: CRUD, auth, search
+  as you type, pagination, optimistic UI, live chat, a live dashboard, modals with server
+  validation, master-detail, uploads, background work, testing, deployment.
+- **[Benchmarks](benchmarks/)** — against Django and FastAPI, with the harness and the
+  caveats.
+- The docs site is itself a Jongo app: `jongo dev docs/docs_site.py --port 8790`.
+
 ## Why
 
 In Django, one feature is spread across `models.py`, `urls.py`, `views.py`, a template, a form class and usually some JavaScript. In Jongo it's one idea in one place:

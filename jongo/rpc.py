@@ -62,8 +62,54 @@ class ServerFunction:
             try:
                 self._hints = typing.get_type_hints(self.fn)
             except Exception:
-                self._hints = {}
+                self._hints = self._resolve_hints()
         return self._hints
+
+    def _resolve_hints(self) -> dict:
+        """Resolve annotations that ``get_type_hints`` could not, or refuse to run.
+
+        Silently falling back to "no hints" would turn off the checks this boundary
+        exists for: an unvalidated string would reach an ``int`` parameter, and a raw id
+        would reach a parameter that is supposed to receive a loaded row. A function whose
+        parameters cannot be resolved is a programming error, so it is reported as one.
+        """
+        from .db.models import models_registry
+
+        models = {model.__name__: model for model in models_registry.values()}
+        try:  # most often a model class defined somewhere get_type_hints can't see
+            return typing.get_type_hints(self.fn, localns=models)
+        except Exception:
+            pass
+
+        # Resolve one parameter at a time, so an unresolvable *return* annotation — which
+        # is never used for validation — doesn't take the whole function down with it.
+        namespace = {**vars(typing), **getattr(self.fn, "__globals__", {}), **models}
+        hints, unresolved = {}, []
+        for name, parameter in inspect.signature(self.fn).parameters.items():
+            annotation = parameter.annotation
+            if annotation is inspect.Parameter.empty:
+                continue
+            if not isinstance(annotation, str):
+                hints[name] = annotation
+                continue
+            try:
+                resolved = eval(annotation, namespace)  # noqa: S307 - the author's own source
+            except Exception:
+                unresolved.append(f"{name}: {annotation}")
+                continue
+            if isinstance(resolved, str):  # a quoted forward reference that still names nothing
+                unresolved.append(f"{name}: {resolved}")
+                continue
+            hints[name] = resolved
+        if unresolved:
+            raise JongoError(
+                f"@server {self.fn.__name__}(): can't resolve the type of "
+                + ", ".join(unresolved)
+                + ". Arguments from the browser are checked against these hints, so the "
+                "function is not safe to call without them — define the annotated type "
+                "where the function can see it (module level), or drop the annotation."
+            )
+        return hints
 
     def invoke(self, request, args, kwargs):
         """Validate browser-supplied arguments and call the function."""

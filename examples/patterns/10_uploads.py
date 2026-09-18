@@ -50,7 +50,7 @@ def upload(request):
 @app.route("/uploaded/<name>")
 def serve(request, name: str):
     """Serve by stored name only, and confirm the row exists before reading the disk."""
-    row = Upload.get_or_none(stored=name)
+    row = Upload.filter(stored=name).first()
     if row is None:
         raise NotFound()
     return Response((UPLOADS / row.stored).read_bytes(),

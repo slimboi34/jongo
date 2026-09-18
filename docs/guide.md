@@ -300,37 +300,73 @@ updated = await rename(todo["id"], new_title)
 - **`request` is always the first parameter**, with `request.user`, `request.session` and
   the rest.
 - **Return** anything JSON-able, or `redirect(...)`.
-- **Raise** `Forbidden`, `NotFound` or `ServerError("message")` to send a clean error the
-  browser can catch:
+- **Raise** `Forbidden` or `NotFound` to send a status and a message the browser can read,
+  or `db.ValidationError({"email": "..."})` to send field errors:
+
+```python
+@server
+def rename(request, todo: Todo, title: str) -> dict:
+    if todo.owner_id != request.user.id:
+        raise Forbidden("Not your todo.")          # 403, message included
+    if not title.strip():
+        raise db.ValidationError({"title": "Required."})   # 400, field errors included
+    ...
+```
+
+In the browser, a failed call raises `ServerError`, which carries `.type`, `.status` and
+`.errors`:
 
 ```python
 try:
     await rename(todo["id"], title)
 except ServerError as exc:
-    error.set(str(exc))
+    if exc.errors:
+        field_errors.set(exc.errors)
+    else:
+        error.set(str(exc))
 ```
 
-For *expected* problems — a taken email, a failed validation — return data instead of
-raising. `{"errors": {"email": "..."}}` renders next to the field and is not an exception.
+> **Any other exception is reported to the browser as a bare "Server error"** — the real
+> message and traceback appear in the server log, and in the browser only when `dev` is on.
+> That is deliberate: an unexpected exception must not leak internals to a visitor. So a
+> message you actually want a user to read has to be raised as one of the types above, or —
+> better for expected problems like a taken email — simply *returned as data*:
+> `{"errors": {"email": "already taken"}}` is not an exception at all, and renders next to
+> the field.
 
 ---
 
 ## 8. Styles
 
+Each keyword to `css()` becomes one scoped class, and its value is a dict of declarations
+with snake_case property names. Nested keys give you pseudo-classes, child selectors and
+media queries:
+
 ```python
-from jongo import css
+from jongo import css, global_css
 
-s = css("""
-.card { padding: 16px; border-radius: 12px; }
-.card:hover { transform: translateY(-1px); }
-""")
+s = css(
+    card={"padding": 16, "border_radius": 12,
+          ":hover": {"transform": "translateY(-1px)"},
+          "& h2": {"margin": 0},
+          "@media (max-width: 600px)": {"padding": 8}},
+    muted={"opacity": .7, "font_size": 14},
+)
 
-div(h2("Hi"), class_=s.card)      # class="card-3f9a1c" — scoped, no collisions
+div(h2("Hi"), class_=s.card)          # class="card-3f9a1c" — scoped, no collisions
+div("...", class_=[s.card, s.muted])  # several classes
 ```
 
-`global_css(...)` is for resets and `@font-face`. Style props take a dict, with snake_case
-keys: `style={"font_weight": 600, "max_width": "60ch"}`. All stylesheets are served together
-from `/_jongo/app.css`.
+`global_css()` takes either a raw CSS string or a dict of selectors, and is where resets,
+`:root` variables and `@font-face` go:
+
+```python
+global_css(""":root { --ink: #14161a; } body { margin: 0; }""")
+```
+
+One-off styles go inline with the same snake_case keys:
+`style={"font_weight": 600, "max_width": "60ch"}`. All stylesheets are served together from
+`/_jongo/app.css`.
 
 ---
 
@@ -367,7 +403,8 @@ Book.exclude(tags=[]).order_by("-published")[:10]
 Book.filter(db.Q(title__startswith="The") | db.Q(tags__contains="classic")).count()
 Book.filter(author__name__iexact="le guin")          # follow a relation with __
 Book.get(id=3)                                        # DoesNotExist / MultipleObjectsReturned
-Book.get_or_none(slug="x")
+Book.filter(slug="x").first()                         # None when there is no match
+Book.filter(draft=True).exists()
 Book.filter(done=False).update(done=True)
 Book.filter(draft=True).delete()
 author.books.create(title="The Dispossessed")         # reverse accessor

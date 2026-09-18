@@ -33,7 +33,7 @@ def index():
 
 @app.page("/a/<slug>")
 def detail(slug: str):
-    article_row = Article.get_or_none(slug=slug)
+    article_row = Article.filter(slug=slug).first()
     if article_row is None:
         return Layout(links=_links(), current=None, body=p("No such article."))
     return Layout(
