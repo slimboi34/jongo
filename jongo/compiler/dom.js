@@ -287,6 +287,106 @@ const $ref = $fn(function ref(initial = null) {
   return inst.hooks[i];
 }, ["initial"]);
 
+// ---- live channels ----------------------------------------------------------------------------
+// One EventSource per tab carries every channel the mounted components asked for. The set of
+// channels changes as components mount and unmount, so the stream is reopened — batched across a
+// render — whenever it changes, and reconnected with backoff when the connection drops.
+
+const $LIVE = { source: null, handlers: new Map(), retry: 500, syncing: false };
+
+function $liveNames() {
+  return [...$LIVE.handlers.keys()];
+}
+
+function $liveSync() {
+  if ($LIVE.syncing) return;
+  $LIVE.syncing = true;
+  queueMicrotask(() => {
+    $LIVE.syncing = false;
+    const want = $liveNames().join(",");
+    if ($LIVE.source && $LIVE.source.jchannels === want) return;
+    if ($LIVE.source) {
+      $LIVE.source.jclosed = true;
+      $LIVE.source.close();
+      $LIVE.source = null;
+    }
+    if (want) $liveOpen(want);
+  });
+}
+
+function $liveOpen(want) {
+  if (typeof window === "undefined" || !window.EventSource) return;
+  const source = new EventSource("/_jongo/live?channels=" + encodeURIComponent(want));
+  source.jchannels = want;
+  $LIVE.source = source;
+  source.onopen = () => {
+    $LIVE.retry = 500;
+  };
+  source.onmessage = (event) => {
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch (err) {
+      return;
+    }
+    const handlers = $LIVE.handlers.get(message.channel);
+    if (!handlers) return;
+    for (const handler of [...handlers]) {
+      try {
+        handler(message.data);
+      } catch (err) {
+        $report(err);
+      }
+    }
+  };
+  source.onerror = () => {
+    source.close();
+    if (source.jclosed || $LIVE.source !== source) return;
+    $LIVE.source = null;
+    const wait = $LIVE.retry;
+    $LIVE.retry = Math.min(wait * 2, 10000);
+    setTimeout(() => {
+      const names = $liveNames().join(",");
+      if (!$LIVE.source && names) $liveOpen(names);
+    }, wait);
+  };
+}
+
+function $liveAdd(channel, handler) {
+  let handlers = $LIVE.handlers.get(channel);
+  if (!handlers) {
+    handlers = new Set();
+    $LIVE.handlers.set(channel, handlers);
+  }
+  handlers.add(handler);
+  $liveSync();
+  return () => {
+    handlers.delete(handler);
+    if (!handlers.size) $LIVE.handlers.delete(channel);
+    $liveSync();
+  };
+}
+
+const $live = $fn(function live(channel, handler) {
+  const inst = $hookOwner("live");
+  const i = inst.hi++;
+  const hook = inst.hooks[i] || (inst.hooks[i] = { channel: null, joined: null, fn: null, cleanup: null });
+  hook.fn = handler; // the latest closure, so the handler always sees current props
+  if (hook.channel === channel) return null;
+  hook.channel = channel;
+  $pendingEffects.push(() => {
+    if (inst.dead || hook.joined === hook.channel) return;
+    if (typeof hook.cleanup === "function") hook.cleanup();
+    hook.cleanup = null;
+    hook.joined = hook.channel;
+    if (hook.channel === null || hook.channel === undefined) return;
+    hook.cleanup = $liveAdd($str(hook.channel), (data) => {
+      if (!inst.dead && hook.fn) hook.fn(data);
+    });
+  });
+  return null;
+}, ["channel", "handler"]);
+
 // ---- DOM reconciliation -----------------------------------------------------------------------
 
 function $domOf(v) {

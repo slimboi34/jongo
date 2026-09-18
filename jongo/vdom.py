@@ -301,6 +301,18 @@ def effect(fn, deps=None) -> None:
     _require_render("effect")
 
 
+def live(channel, handler) -> None:
+    """Subscribe this component to a channel; ``handler(data)`` runs in the browser.
+
+        live(f"room:{room}", lambda message: messages.set([*messages.value, message]))
+
+    The subscription follows the component: it opens when the component mounts, moves
+    when ``channel`` changes, and closes when it unmounts. The channel must be declared
+    with ``@app.channel(...)``. Nothing happens during server rendering.
+    """
+    _require_render("live")
+
+
 def ref(initial=None) -> Ref:
     """A mutable box; pass as ``ref=`` to an element to get its DOM node in ``.current``."""
     _require_render("ref")

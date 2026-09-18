@@ -17,6 +17,7 @@ import typing
 import urllib.parse
 from pathlib import Path
 
+from . import live as live_module
 from . import vdom
 from . import log as jlog
 from .errors import CompileError, HTTPError, NotFound
@@ -87,6 +88,7 @@ class Jongo:
         self.before_request_hooks: list = []
         self.after_request_hooks: list = []
         self.error_handlers: dict[int, typing.Callable] = {}
+        self.channels: list[live_module.Channel] = []
         self.layout_component = None
         self.layout_props = None
         self._bundle: tuple[str, str] | None = None
@@ -133,6 +135,26 @@ class Jongo:
 
     def post(self, path: str, **options):
         return self.route(path, methods=("POST",), **options)
+
+    def channel(self, pattern: str):
+        """Declare a channel components may subscribe to with ``live()``.
+
+        The decorated function authorises each subscription: return False (or raise
+        Forbidden) to refuse it. Pattern parameters work as they do in routes::
+
+            @app.channel("room:<int:id>")
+            def room(request, id):
+                return id in request.session.get("rooms", [])
+
+        A channel that is not declared cannot be subscribed to at all — the same rule
+        that keeps undecorated functions off the RPC boundary.
+        """
+
+        def decorator(fn):
+            self.channels.append(live_module.Channel(pattern, fn))
+            return fn
+
+        return decorator
 
     def layout(self, component=None, *, props=None):
         """Wrap every page in ``component``. ``props(request)`` may supply extra props."""
@@ -463,16 +485,35 @@ class Jongo:
             return json_response({"ok": result})
 
         def live(request):
+            """Two streams on one route: dev live-reload, and declared channels."""
+            channels = live_module.parse_channels(request.query.get("channels"))
+            if channels:
+                allowed = live_module.authorize(channels, app.channels, request)
+                subscriber = live_module.hub.subscribe(allowed)
+
+                def stream():
+                    try:
+                        yield from live_module.event_stream(subscriber)
+                    finally:  # the WSGI server closes the iterator when the client goes
+                        live_module.hub.unsubscribe(subscriber)
+
+                return Response(
+                    stream(),
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                    content_type="text/event-stream",
+                )
+
             if not app.dev:
                 raise NotFound()
 
-            def stream():
+            def reload_stream():
                 yield f"retry: 400\ndata: {app.boot_id}\n\n"
                 while True:
                     time.sleep(15)
                     yield ": ping\n\n"
 
-            return Response(stream(), headers={"Cache-Control": "no-cache"}, content_type="text/event-stream")
+            return Response(reload_stream(), headers={"Cache-Control": "no-cache"},
+                            content_type="text/event-stream")
 
         def static(request, path: str):
             base = (app.root / "static").resolve()

@@ -45,6 +45,7 @@ def _special_objects() -> dict[int, str]:
     special = {
         vdom.state: "$state",
         vdom.effect: "$effect",
+        vdom.live: "$live",
         vdom.ref: "$ref",
         vdom.navigate: "$navigate",
         vdom.refresh: "$refresh",

@@ -182,6 +182,41 @@ def rename(request, todo: Todo, title: str) -> dict:   # `todo: Todo` loads the 
 - **Options:** `@server(login_required=True)`, `@server(admin_required=True)`, and `@server(refresh=True)` to re-run the page loader after each call.
 - **Security:** every call is CSRF-protected. Only functions you decorate are exposed.
 
+## Real-time
+
+Push from a server function straight into a mounted component. Declare the channel, and
+the declaring function authorises each subscription — an undeclared channel cannot be
+subscribed to at all, the same rule that keeps undecorated functions off the RPC boundary.
+
+```python
+@app.channel("room:<int:id>")
+def room(request, id):
+    return id in request.session.get("rooms", [])
+
+@server
+def post(request, room: int, text: str) -> dict:
+    message = Message.create(room_id=room, text=text).to_dict()
+    broadcast(f"room:{room}", message)          # -> every subscribed browser
+    return message
+
+@component
+def Chat(room):
+    messages = state([])
+    live(f"room:{room}", lambda message: messages.set([*messages.value, message]))
+    return ul([li(m["text"], key=m["id"]) for m in messages.value])
+```
+
+`live()` is a hook like `state()` and `effect()`: the subscription opens when the component
+mounts, moves when the channel changes, and closes when it unmounts. One SSE connection per
+tab carries every channel the page asked for, and reconnects with backoff if it drops.
+
+- It is a **live feed, not a queue**: a browser that reconnects sees what happens next, not
+  what it missed, and a connection that falls more than 100 messages behind sheds its oldest.
+- The hub is **per process**. With one worker and threads (the default `jongo run`) a
+  broadcast reaches every connection. Across multiple worker processes, each worker only
+  reaches its own connections — put a shared bus in front if you need that.
+- Each streaming connection holds a worker thread, so raise `--threads` for a chatty app.
+
 ## Styles
 
 ```python

@@ -43,7 +43,7 @@ class TestClient:
         self.app = app
         self.cookies: dict[str, str] = {}
 
-    def request(self, method, path, *, data=None, json=None, headers=None, follow_redirects=False) -> TestResponse:
+    def _environ(self, method, path, *, data=None, json=None, headers=None) -> dict:
         method = method.upper()
         path, _, query = path.partition("?")
         headers = dict(headers or {})
@@ -82,7 +82,29 @@ class TestClient:
         for key, value in headers.items():
             name = key.upper().replace("-", "_")
             environ[name if name in ("CONTENT_TYPE", "CONTENT_LENGTH") else f"HTTP_{name}"] = value
+        return environ
 
+    def stream(self, path, *, headers=None):
+        """Open a streaming response without consuming it — for ``text/event-stream``.
+
+        Returns ``(response, chunks)``; ``response.body`` is empty and ``chunks`` is the
+        live iterator. Close it (``chunks.close()``) to disconnect, as a browser would.
+        """
+        environ = self._environ("GET", path, headers=headers)
+        captured = {}
+
+        def start_response(status, response_headers, exc_info=None):
+            captured["status"], captured["headers"] = status, response_headers
+
+        chunks = iter(self.app(environ, start_response))
+        first = None
+        if "status" not in captured:  # a WSGI app may not call start_response until the first chunk
+            first = next(chunks, None)
+        response = TestResponse(captured["status"], captured["headers"], first or b"")
+        return response, chunks
+
+    def request(self, method, path, *, data=None, json=None, headers=None, follow_redirects=False) -> TestResponse:
+        environ = self._environ(method, path, data=data, json=json, headers=headers)
         captured = {}
 
         def start_response(status, response_headers, exc_info=None):
