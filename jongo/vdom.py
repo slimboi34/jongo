@@ -26,6 +26,8 @@ RAW_TEXT_TAGS = frozenset(("script", "style"))
 # (a crafted name would otherwise inject attributes/handlers). URL attributes get their
 # scheme checked so attacker-supplied values can't smuggle in javascript:.
 _VALID_TAG = re.compile(r"^[A-Za-z][A-Za-z0-9-]*$")
+#: tag -> lower-cased tag, for tags already checked against _VALID_TAG
+_VALIDATED_TAGS: dict[str, str] = {}
 _VALID_ATTR = re.compile(r"^[A-Za-z_:][-A-Za-z0-9_:.]*$")
 _URL_ATTRS = frozenset(("href", "src", "action", "formaction", "xlink:href", "poster", "cite", "data"))
 # Attributes that are never safe to set from data: `on*` are inline event handlers, and
@@ -386,9 +388,11 @@ def _render(node, out, select_value) -> bool:
         return _render(render_component(node.type, node.props, node.children), out, select_value)
 
     tag = node.type
-    if not _VALID_TAG.match(tag):
-        raise JongoError(f"invalid tag name {tag!r}: tag names must be letters, digits and hyphens")
-    tl = tag.lower()
+    tl = _VALIDATED_TAGS.get(tag)
+    if tl is None:
+        if not _VALID_TAG.match(tag):
+            raise JongoError(f"invalid tag name {tag!r}: tag names must be letters, digits and hyphens")
+        tl = _VALIDATED_TAGS[tag] = tag.lower()   # one regex per distinct tag, not per node
     props = node.props
     if tl == "option" and select_value is not None and "selected" not in props:
         props = {**props, "selected": str(props.get("value")) == str(select_value)}

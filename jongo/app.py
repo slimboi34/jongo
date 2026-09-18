@@ -283,9 +283,12 @@ class Jongo:
             extra = self.layout_props(request) if self.layout_props else {}
             tree = self.layout_component(tree, **extra)
 
+        # Render the HTML from the *serialised* tree, not the original one, so the server
+        # and the browser start from identical data and cannot diverge. serialize() already
+        # emits JSON primitives, so re-parsing the encoded string would change nothing.
         data = serialize(tree)
         encoded = json.dumps(data, separators=(",", ":"))
-        body_html = render_to_string(build(json.loads(encoded)))
+        body_html = render_to_string(build(data))
         _, build_hash = self.bundle()
         headers = {"Vary": "X-Jongo-Nav", "Cache-Control": "no-store"}
         if request.is_navigation:

@@ -8,3 +8,7 @@ __pycache__/
 *.sqlite3-*
 dist/
 build/
+
+# benchmark artefacts
+benchmarks/*.sqlite3
+examples/patterns/uploaded/
