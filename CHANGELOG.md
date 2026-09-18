@@ -47,9 +47,10 @@ inherent JS-value-model limits below). Regression tests added (suite → 167).
 
 ### Known limitations (documented, inherent to the browser's value model)
 
-These are consequences of JavaScript having one number type, string-keyed objects, and UTF-16
-strings; a clean fix needs a boxed value model. Browser (post-hydration) code only — the server
-is always correct.
+These are consequences of JavaScript having one number type and string-keyed objects; a clean
+fix needs a boxed value model. Browser (post-hydration) code only — the server is always
+correct. (Two more limitations listed here in 0.2.2 — tuples comparing equal to lists, and
+`len()` counting UTF-16 units — are fixed in 0.3.0.)
 
 - `str()`/f-string of an integral float drops the `.0` (`str(10/2)` → `"5"`); format explicitly,
   e.g. `f"{x:.2f}"`.
@@ -57,8 +58,6 @@ is always correct.
   lookups still work.
 - `isinstance` can't distinguish int from float (`isinstance(5, float)` is True); the
   `isinstance(True, int)` case is correct.
-- `len("😀")` counts UTF-16 units (2), not code points; `list(s)` iteration is code-point correct.
-- Tuples and lists compare equal (`(1,2) == [1,2]`), both being JS arrays.
 - Adding a NOT-NULL column to a populated table keeps a `DEFAULT` in the column DDL (SQLite
   requires it to backfill), so such a table differs cosmetically from a freshly-created one.
 

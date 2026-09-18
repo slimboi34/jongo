@@ -9,12 +9,26 @@ const $isPlain = (o) => {
 };
 const $camel = (name) => name.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
 
+// A tuple is a frozen array carrying a non-enumerable marker, so it costs nothing to read
+// and still never compares equal to a list — as in Python.
+function $tup(items) {
+  const out = Array.isArray(items) ? items.slice() : [...$iter(items)];
+  Object.defineProperty(out, "$tuple", { value: true });
+  return Object.freeze(out);
+}
+const $isTup = (x) => Array.isArray(x) && x.$tuple === true;
+
+// Strings are UTF-16 in JavaScript and code points in Python. The regex is a fast native
+// scan, so only strings that actually contain astral characters pay for the conversion.
+const $SURROGATE = /[\uD800-\uDBFF]/;
+const $chars = (s) => ($SURROGATE.test(s) ? Array.from(s) : s);
+
 function $typename(x) {
   if (x === null || x === undefined) return "NoneType";
   if (typeof x === "string") return "str";
   if (typeof x === "number") return Number.isInteger(x) ? "int" : "float";
   if (typeof x === "boolean") return "bool";
-  if (Array.isArray(x)) return "list";
+  if (Array.isArray(x)) return x.$tuple ? "tuple" : "list";
   if (x instanceof Set) return "set";
   if ($isPlain(x)) return "dict";
   if (typeof x === "function") return "function";
@@ -90,6 +104,7 @@ function $eq(a, b) {
   if (a === b) return true;
   if (a == null || b == null) return a == null && b == null;
   if (Array.isArray(a) && Array.isArray(b)) {
+    if ($isTup(a) !== $isTup(b)) return false; // (1, 2) != [1, 2]
     return a.length === b.length && a.every((x, i) => $eq(x, b[i]));
   }
   if ($isPlain(a) && $isPlain(b)) {
@@ -142,11 +157,17 @@ function $in(x, c) {
 }
 
 function $add(a, b) {
-  if (Array.isArray(a) && Array.isArray(b)) return a.concat(b);
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if ($isTup(a) !== $isTup(b)) {
+      throw $b.TypeError(`can only concatenate ${$typename(a)} (not "${$typename(b)}") to ${$typename(a)}`);
+    }
+    return $isTup(a) ? $tup(a.concat(b)) : a.concat(b);
+  }
   return a + b;
 }
 
 function $iadd(a, b) {
+  if ($isTup(a)) return $add(a, b);  // tuples are immutable: += rebinds, as in Python
   if (Array.isArray(a)) {
     a.push(...$iter(b));
     return a;
@@ -162,7 +183,7 @@ function $mul(a, b) {
   if (Array.isArray(a)) {
     const out = [];
     for (let i = 0; i < b; i++) out.push(...a);
-    return out;
+    return $isTup(a) ? $tup(out) : out;
   }
   return a * b;
 }
@@ -243,9 +264,10 @@ function $gi(o, k) {
   if (o === null || o === undefined) throw $b.TypeError("'NoneType' object is not subscriptable");
   if (Array.isArray(o) || typeof o === "string") {
     if (typeof k === "number") {
-      const i = k < 0 ? o.length + k : k;
-      if (i < 0 || i >= o.length) throw $b.IndexError(`${$typename(o)} index out of range`);
-      return o[i];
+      const s = typeof o === "string" ? $chars(o) : o;
+      const i = k < 0 ? s.length + k : k;
+      if (i < 0 || i >= s.length) throw $b.IndexError(`${$typename(o)} index out of range`);
+      return s[i];
     }
   } else if ($isPlain(o)) {
     const nk = $key(k);
@@ -259,6 +281,7 @@ function $gi(o, k) {
 }
 
 function $si(o, k, v) {
+  if ($isTup(o)) throw $b.TypeError("'tuple' object does not support item assignment");
   if (Array.isArray(o) && typeof k === "number") {
     const i = k < 0 ? o.length + k : k;
     if (i < 0 || i >= o.length) throw $b.IndexError("list assignment index out of range");
@@ -272,6 +295,7 @@ function $si(o, k, v) {
 }
 
 function $del(o, k) {
+  if ($isTup(o)) throw $b.TypeError("'tuple' object doesn't support item deletion");
   if (Array.isArray(o)) o.splice(k < 0 ? o.length + k : k, 1);
   else if (o instanceof Map) o.delete(k);
   else {
@@ -280,7 +304,8 @@ function $del(o, k) {
   }
 }
 
-function $slice(o, start, stop, step) {
+function $slice(source, start, stop, step) {
+  const o = typeof source === "string" ? $chars(source) : source;
   const len = o.length;
   step = step === null || step === undefined ? 1 : step;
   if (step === 0) throw $b.ValueError("slice step cannot be zero");
@@ -289,14 +314,17 @@ function $slice(o, start, stop, step) {
     if (i < 0) i += len;
     return Math.max(lo, Math.min(hi, i));
   };
-  if (step === 1) return o.slice(norm(start, 0, 0, len), norm(stop, len, 0, len));
+  if (step === 1) {
+    const cut = o.slice(norm(start, 0, 0, len), norm(stop, len, 0, len));
+    return typeof source === "string" && typeof cut !== "string" ? cut.join("") : cut;
+  }
   const out = [];
   if (step > 0) {
     for (let i = norm(start, 0, 0, len); i < norm(stop, len, 0, len); i += step) out.push(o[i]);
   } else {
     for (let i = norm(start, len - 1, -1, len - 1); i > norm(stop, -1, -1, len - 1); i += step) out.push(o[i]);
   }
-  return typeof o === "string" ? out.join("") : out;
+  return typeof source === "string" ? out.join("") : out;
 }
 
 function $ga(o, name) {
@@ -396,6 +424,7 @@ function $repr(x) {
     return Number.isNaN(x) ? "nan" : x > 0 ? "inf" : "-inf";
   }
   if (typeof x === "string") return "'" + x.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
+  if ($isTup(x)) return x.length === 1 ? "(" + $repr(x[0]) + ",)" : "(" + x.map($repr).join(", ") + ")";
   if (Array.isArray(x)) return "[" + x.map($repr).join(", ") + "]";
   if (x instanceof Set) return x.size ? "{" + [...x].map($repr).join(", ") + "}" : "set()";
   if ($isPlain(x)) return "{" + Object.entries(x).map(([k, v]) => `${$repr(k)}: ${$repr(v)}`).join(", ") + "}";
@@ -632,7 +661,8 @@ function $round(x, n) {
 
 Object.assign($b, {
   len(x) {
-    if (typeof x === "string" || Array.isArray(x)) return x.length;
+    if (typeof x === "string") return $chars(x).length;
+    if (Array.isArray(x)) return x.length;
     if (x instanceof Set || x instanceof Map) return x.size;
     if ($isPlain(x)) return Object.keys(x).length;
     if (x !== null && x !== undefined && typeof x.length === "number") return x.length;
@@ -655,7 +685,7 @@ Object.assign($b, {
   },
   bool: (x) => $t(x),
   list: (x) => (x === undefined ? [] : [...$iter(x)]),
-  tuple: (x) => (x === undefined ? [] : [...$iter(x)]),
+  tuple: (x) => $tup(x === undefined ? [] : [...$iter(x)]),
   set: (x) => new Set(x === undefined ? [] : $iter(x)),
   dict: $fn(
     function (x, kw) {
@@ -676,12 +706,12 @@ Object.assign($b, {
     else throw $b.ValueError("range() arg 3 must not be zero");
     return out;
   },
-  enumerate: $fn((it, start = 0) => [...$iter(it)].map((x, i) => [i + start, x]), ["iterable", "start"]),
+  enumerate: $fn((it, start = 0) => [...$iter(it)].map((x, i) => $tup([i + start, x])), ["iterable", "start"]),
   zip: $fn(
     function (its) {
       const arrays = its.map((x) => [...$iter(x)]);
       const n = arrays.length ? Math.min(...arrays.map((a) => a.length)) : 0;
-      return Array.from({ length: n }, (_, i) => arrays.map((a) => a[i]));
+      return Array.from({ length: n }, (_, i) => $tup(arrays.map((a) => a[i])));
     },
     [], "iterables"
   ),
@@ -709,7 +739,8 @@ Object.assign($b, {
       case $b.int: return typeof x === "boolean" || (typeof x === "number" && Number.isInteger(x));
       case $b.float: return typeof x === "number";
       case $b.bool: return typeof x === "boolean";
-      case $b.list: case $b.tuple: return Array.isArray(x);
+      case $b.list: return Array.isArray(x) && !x.$tuple;
+      case $b.tuple: return $isTup(x);
       case $b.dict: return $isPlain(x);
       case $b.set: return x instanceof Set;
     }
@@ -718,7 +749,7 @@ Object.assign($b, {
   repr: $repr,
   chr: (n) => String.fromCodePoint(n),
   ord: (s) => s.codePointAt(0),
-  divmod: (a, b) => [$floordiv(a, b), $mod(a, b)],
+  divmod: (a, b) => $tup([$floordiv(a, b), $mod(a, b)]),
   pow: (a, b, m) => {
     if (m === undefined || m === null) return a ** b;
     if (b < 0) throw $b.ValueError("pow() 2nd argument cannot be negative when 3rd argument specified");
@@ -879,7 +910,7 @@ const $DICT = {
   get: (d, [k, dflt = null]) => ($hasOwn(d, $key(k)) ? d[$key(k)] : dflt),
   keys: (d) => Object.keys(d),
   values: (d) => Object.values(d),
-  items: (d) => Object.entries(d),
+  items: (d) => Object.entries(d).map($tup),
   pop(d, args) {
     const k = $key(args[0]);
     if ($hasOwn(d, k)) {
@@ -923,11 +954,18 @@ const $SET = {
   clear(s) { s.clear(); },
 };
 
+const $TUPLE_METHODS = new Set(["index", "count"]);
+
 function $m(o, name, args, kw) {
   if (o === null || o === undefined) throw $b.AttributeError(`'NoneType' object has no attribute '${name}'`);
   let shim;
   if (typeof o === "string") shim = $STR[name];
-  else if (Array.isArray(o)) shim = $LIST[name];
+  else if (Array.isArray(o)) {
+    if (o.$tuple && !$TUPLE_METHODS.has(name)) {
+      throw $b.AttributeError(`'tuple' object has no attribute '${name}'`);
+    }
+    shim = $LIST[name];
+  }
   else if (o instanceof Set) shim = $SET[name];
   else if ($isPlain(o) && typeof o[name] !== "function") shim = $DICT[name];
   if (shim) return shim(o, args, kw || {});

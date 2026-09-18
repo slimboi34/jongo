@@ -644,7 +644,8 @@ class FunctionTranspiler:
     def x_List(self, node):
         return f"[{self._elements(node.elts)}]"
 
-    x_Tuple = x_List
+    def x_Tuple(self, node):
+        return f"$tup([{self._elements(node.elts)}])"
 
     def x_Set(self, node):
         return f"$set([{self._elements(node.elts)}])"  # normalises bool/int members (True == 1)

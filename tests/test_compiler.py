@@ -209,6 +209,87 @@ def s_modules():
     return [math.floor(2.7), math.sqrt(16), round(math.pi, 3), json.loads('{"a": [1, 2]}')]
 
 
+def s_tuples_are_not_lists():
+    """A tuple must never compare equal to a list, as in Python."""
+    pair = (1, 2)
+    return [
+        pair == (1, 2), pair == [1, 2], [1, 2] == pair,
+        list(pair) == [1, 2], tuple([1, 2]) == pair,
+        (1,) == (1,), len(pair), pair[0], pair[-1], list(pair[:1]),
+        isinstance(pair, tuple), isinstance(pair, list),
+        isinstance([1], tuple), isinstance([1], list),
+        repr((1, 2)), repr((1,)), repr([1, 2]),
+        [list(p) for p in [(1, "a"), (2, "b")]],
+    ]
+
+
+def s_tuples_from_builtins():
+    pairs = list(enumerate(["a", "b"]))
+    zipped = list(zip([1, 2], ["x", "y"]))
+    data = {"k": 1}
+    return [
+        pairs[0] == (0, "a"), pairs[0] == [0, "a"],
+        zipped[0] == (1, "x"), zipped[0] == [1, "x"],
+        list(data.items())[0] == ("k", 1), list(data.items())[0] == ["k", 1],
+        divmod(7, 2) == (3, 1), divmod(7, 2) == [3, 1],
+        [list(p) for p in pairs], [list(p) for p in zipped],
+    ]
+
+
+def s_tuple_operators():
+    pair = (1, 2)
+    joined = pair + (3,)
+    doubled = pair * 2
+    grown = pair
+    grown += (9,)
+    return [
+        list(joined), joined == (1, 2, 3), joined == [1, 2, 3],
+        list(doubled), doubled == (1, 2, 1, 2), doubled == [1, 2, 1, 2],
+        list(grown), grown == (1, 2, 9), list(pair),
+        list([1, 2] + [3]), [1, 2] + [3] == [1, 2, 3],
+    ]
+
+
+def s_tuples_are_immutable():
+    pair = (1, 2)
+    errors = []
+    try:
+        pair[0] = 9
+    except TypeError:
+        errors.append("setitem")
+    try:
+        pair.append(3)
+    except AttributeError:
+        errors.append("append")
+    try:
+        (1, 2) + [3]
+    except TypeError:
+        errors.append("concat")
+    return [errors, pair.index(2), pair.count(1), list(pair)]
+
+
+def s_tuple_unpacking_still_works():
+    a, b = (1, 2)
+    total = 0
+    for index, letter in enumerate(["x", "y"]):
+        total += index
+    first, *rest = (1, 2, 3)
+    return [a, b, total, first, rest, list(rest)]
+
+
+def s_strings_are_code_points():
+    """len() and indexing count characters, not UTF-16 units."""
+    face = "\N{GRINNING FACE}"
+    text = face + "ok" + face
+    return [
+        len(face), len(text), len("abc"),
+        text[0] == face, text[1], text[-1] == face,
+        list(text[0:2]), list(text[:1]), list(text[-2:]),
+        len(text[1:3]), list(reversed(list(text))) == [face, "k", "o", face],
+        [len(c) for c in text],
+    ]
+
+
 SAMPLES = {name: fn for name, fn in dict(globals()).items() if name.startswith("s_")}
 
 
