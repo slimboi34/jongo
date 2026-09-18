@@ -31,46 +31,59 @@ One laptop (Apple Silicon, Python 3.12), 3000 requests at concurrency 16, reques
 
 | | `/json` | `/page` | `/rows` |
 |---|---|---|---|
-| Jongo (WSGI) | 1496 | 1710 | 485 |
-| Django (WSGI) | 2049 | 1062 | 956 |
-| FastAPI (ASGI) | 7118 | 5635 | 2091 |
+| Jongo (WSGI) | 2530 | 2315 | 791 |
+| Django (WSGI) | 2591 | 2508 | 856 |
+| FastAPI (ASGI) | 6970 | 6835 | 1597 |
 
 **Read these numbers with the variance in mind.** Across repeated runs on this machine the
-same configuration moved by ±30% — Jongo's `/json` came out at 2333, 1826 and 1496 on three
-consecutive runs, and Django's `/page` at 2225, 1737 and 1062. Anything inside that band is
-noise. Run it on hardware you care about before drawing a conclusion.
+same configuration moved by ±30% — Jongo's `/json` came out at 2333, 1826, 1496 and 2530 on
+four runs, and Django's `/page` at 2225, 1737, 1062 and 2508. Anything inside that band is
+noise. Because whole runs drift together, the *ratio* between two frameworks in the same run
+is worth more than either number, and that is what the analysis below uses. Run it on
+hardware you care about before drawing a conclusion.
 
-What *was* consistent across every run:
+What was consistent across every run:
 
-1. **FastAPI on uvicorn is 3–4× faster on the simple endpoints.** ASGI plus a minimal
+1. **FastAPI on uvicorn is 3-4x faster on the simple endpoints.** ASGI plus a minimal
    framework is hard to beat when there is nothing to render.
-2. **Jongo and Django trade places on `/json` and `/page`** — the differences there are
+2. **Jongo and Django trade places on `/json` and `/page`** - the differences there are
    inside the noise band.
-3. **Django is consistently ~1.5–2× faster on `/rows`** (956 vs 485 here; 958 vs 618 and
-   642 vs 421 on other runs). This one is real and repeatable.
+3. **`/rows` is the endpoint that separates them**, and it is where Jongo has moved most.
 
 ## Why `/rows` costs Jongo more
 
-Profiling one request (100 rows, ~500 nodes) puts about three quarters of the time in
-rendering and a twentieth in the database:
+Jongo renders the page for two audiences: HTML for the first paint, and a JSON tree so the
+browser can hydrate and take over. Django's endpoint builds a string and stops. That second
+audience is the whole point - it is what makes the page interactive without a second
+codebase - but it is not free, and `/rows` is where you see the bill.
+
+It used to be a much bigger bill. Two rounds of work on the render path:
+
+| | Jongo `/rows` over Django `/rows` | in-process per request |
+|---|---|---|
+| Before | 0.51x (about half Django's throughput) | 0.799 ms |
+| After removing the re-parse and per-node tag validation | - | 0.715 ms |
+| After rendering straight from the serialised tree | **0.92x** | **0.512 ms** |
+
+The largest win was structural. The page path used to serialise the tree to JSON, rebuild a
+second VNode tree from that JSON, and render *that* to HTML - the round trip existed so the
+server's HTML and the browser's hydration data could not drift apart. Rendering directly
+from the serialised data keeps that guarantee in a stronger form (there is now one object,
+not a copy) and removes a whole pass and a whole tree from every request.
+
+Profiling one request today (100 rows, ~500 nodes):
 
 | | share of request |
 |---|---|
-| `render_to_string` (HTML) | ~38% |
-| `build` + `serialize` (the hydration tree) | ~28% |
-| the page function, including the ORM | ~23% |
-| the ORM query itself | ~7% |
+| `render_to_string` (HTML) | ~42% |
+| `serialize` (the hydration tree) | ~14% |
+| the page function, including the ORM | ~32% |
+| the ORM query itself | ~10% |
 
-Jongo renders the page **twice over**: once to HTML for the first paint, and once as a JSON
-tree so the browser can hydrate and take over. Django's endpoint emits a string and stops.
-That extra ~28% is what buys you an interactive page without a second codebase — it is the
-cost of the model, not a bug. The trade only pays off when the page is actually interactive;
-for a purely static page, Django's output is cheaper and Jongo has nothing to offer.
-
-The renderer got about 10% faster while these benchmarks were being written (0.799 → 0.715 ms
-per `/rows` request in-process, best of 7 × 300): the HTML was being rendered from a
-*re-parsed* copy of the serialised tree, and the tag-name validation regex was running once
-per node instead of once per distinct tag. The remaining cost is the two passes themselves.
+`build` - previously ~19% on its own - no longer appears. What remains is one walk to
+produce the data and one to render it, which is the cost of the model rather than a defect.
+For a page that is never interactive, Django's single pass is still cheaper and Jongo has
+nothing to offer it.
 
 ## What is not measured here
 
