@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+Four additions, and the bugs found while making them.
+
+### PostgreSQL
+
+- `Jongo(database="postgres://user@host/db")` (or `JONGO_DATABASE`) runs the same models,
+  queries, migrations and tests on PostgreSQL. `pip install "jongo[postgres]"` adds the
+  psycopg driver; the core stays dependency-free and SQLite stays the default.
+- A new `jongo/db/dialect.py` holds the whole difference: paramstyle, `LIKE`/`GLOB`/`ILIKE`,
+  `IS DISTINCT FROM`, `LIMIT ALL`, DDL types, identity columns vs `AUTOINCREMENT`,
+  `RETURNING`, and integrity-error classification.
+- Migrations use native `ALTER` on PostgreSQL, so a type, nullability or foreign-key change
+  no longer rebuilds the table (SQLite still rebuilds, because it must).
+- Table creation is ordered by foreign-key dependency — PostgreSQL rejects a forward
+  reference that SQLite tolerated.
+- **Fixed:** an explicitly inserted id now advances PostgreSQL's identity sequence, which
+  would otherwise hand out a colliding id on the next insert.
+- **Fixed:** a lookup value the column could never hold (`Todo.get(id="not a number")`)
+  matches nothing on both backends instead of erroring on PostgreSQL.
+- The suite runs against either backend: `JONGO_TEST_DATABASE=postgres://… pytest`.
+
+### Real-time channels
+
+- `@app.channel("room:<int:id>")` declares a channel and authorises each subscription. A
+  channel that is not declared cannot be subscribed to, the same rule that keeps
+  undecorated functions off the RPC boundary.
+- `broadcast(channel, data)` pushes to every subscribed browser, from anywhere — a request
+  handler, a thread, a cron job, a queue worker.
+- `live(channel, handler)` is a hook alongside `state()`/`effect()`/`ref()`: it subscribes
+  on mount, moves when the channel changes, and unsubscribes on unmount. One SSE connection
+  per tab carries every channel the page asked for and reconnects with backoff.
+- Data goes through the same `to_json_data` conversion as RPC results, so datetimes and
+  Decimals work and the `$v` sentinel stays escaped.
+- A subscriber that falls more than 100 messages behind sheds its oldest rather than growing
+  the server's memory. The hub is per process; see the guide before running several workers.
+- `TestClient.stream()` opens a streaming response without consuming it.
+
+### Compiler
+
+- **Tuples are real tuples.** A tuple compiles to a frozen array with a non-enumerable
+  marker: `(1, 2) != [1, 2]`, `repr`/`isinstance`/`type` tell it from a list, `enumerate()`,
+  `zip()`, `.items()` and `divmod()` produce tuples, item assignment raises `TypeError`,
+  mutating list methods raise `AttributeError`, `+` and `*` keep the type, and concatenating
+  a tuple with a list is a `TypeError`.
+- **Strings are measured and indexed in code points**, so `len("😀")` is 1 and `s[0]` is a
+  whole character. A native regex checks for surrogates first, so only strings that contain
+  them pay for the conversion.
+- Both are covered by the Python/Node parity suite. Two of the five documented browser
+  limitations are therefore gone; int-vs-float and int-keyed dicts remain (see 0.2.2).
+
+### Security
+
+- **`@server` no longer silently drops validation when it cannot resolve a function's
+  annotations.** `typing.get_type_hints` raises for an annotation naming a class it cannot
+  see — a model defined inside a function, for instance — and that exception was caught and
+  turned into "no hints", leaving the function to receive raw browser input: an unvalidated
+  string where an `int` was declared, and a bare id where a loaded row was expected, so an
+  ownership check such as `note.owner_id != request.user.id` would silently compare against
+  an integer. Hints are now resolved against the model registry, and a parameter that still
+  cannot be resolved raises rather than running unchecked.
+
+### Performance
+
+- Rendering a page no longer round-trips its serialised tree through `json.loads` before
+  building the HTML, and tag-name validation runs once per distinct tag instead of once per
+  node: about 10% off a render-heavy page (0.799 → 0.715 ms in-process, best of 7 × 300).
+  The round trip through `serialize()` is kept — it is what stops the server's HTML and the
+  browser's hydration diverging.
+
+### Documentation
+
+- `docs/guide.md`: the long-form guide.
+- `examples/patterns/`: thirteen complete, runnable apps, each exercised by the test suite.
+- `benchmarks/`: Jongo vs Django vs FastAPI, with the harness and the caveats.
+- `docs/docs_site.py`: the documentation site, itself a Jongo app, with in-browser search.
+- `tests/test_guide_api.py` checks that every API the docs promise exists and behaves as
+  written — it found three wrong claims in the guide and the two bugs above.
+
 ## 0.2.3
 
 **Relicensed from MIT to AGPL-3.0-or-later.** Jongo is now copyleft: it is free to
