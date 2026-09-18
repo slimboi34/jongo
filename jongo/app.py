@@ -34,7 +34,7 @@ from .http import (
 from .routing import Route, Router
 from .rpc import SERVER_FUNCTIONS, coerce
 from .styles import collect_css
-from .vdom import VNode, build, render_to_string, serialize
+from .vdom import VNode, render_to_string, serialize
 
 log = logging.getLogger("jongo")
 SAFE_METHODS = frozenset(("GET", "HEAD", "OPTIONS"))
@@ -284,11 +284,13 @@ class Jongo:
             tree = self.layout_component(tree, **extra)
 
         # Render the HTML from the *serialised* tree, not the original one, so the server
-        # and the browser start from identical data and cannot diverge. serialize() already
-        # emits JSON primitives, so re-parsing the encoded string would change nothing.
+        # and the browser start from identical data and cannot diverge. The renderer walks
+        # that data directly: rebuilding a second VNode tree to render from was a full
+        # extra pass and an extra tree per request, and reading the data itself is the
+        # stronger guarantee anyway.
         data = serialize(tree)
         encoded = json.dumps(data, separators=(",", ":"))
-        body_html = render_to_string(build(data))
+        body_html = render_to_string(data)
         _, build_hash = self.bundle()
         headers = {"Vary": "X-Jongo-Nav", "Cache-Control": "no-store"}
         if request.is_navigation:

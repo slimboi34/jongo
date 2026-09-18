@@ -27,7 +27,11 @@ RAW_TEXT_TAGS = frozenset(("script", "style"))
 # scheme checked so attacker-supplied values can't smuggle in javascript:.
 _VALID_TAG = re.compile(r"^[A-Za-z][A-Za-z0-9-]*$")
 #: tag -> lower-cased tag, for tags already checked against _VALID_TAG
-_VALIDATED_TAGS: dict[str, str] = {}
+# tag -> (lowercased name, "<tag", "</tag>"). Building those two strings once per
+# distinct tag instead of once per node takes a concat and an f-string out of the
+# inner loop. Bounded, because a tag name can reach here from serialised data.
+_VALIDATED_TAGS: dict[str, tuple[str, str, str]] = {}
+_CACHE_MAX = 4096
 _VALID_ATTR = re.compile(r"^[A-Za-z_:][-A-Za-z0-9_:.]*$")
 _URL_ATTRS = frozenset(("href", "src", "action", "formaction", "xlink:href", "poster", "cite", "data"))
 # Attributes that are never safe to set from data: `on*` are inline event handlers, and
@@ -87,18 +91,29 @@ class VNode:
 _KEEP_PROPS = frozenset(("style", "ref", "value", "checked", "selected", "inner_html"))
 
 
+_PROP_NAMES: dict[str, str] = {}
+
+
 def prop_name(name: str) -> str:
     """Map a Python keyword argument to its DOM name.
 
     ``class_`` -> ``class``, ``on_click`` -> ``on:click``, ``aria_label`` -> ``aria-label``.
+    Memoised: it runs for every prop of every element built, and the answer only ever
+    depends on the name.
     """
-    if name.startswith("on_"):
-        return "on:" + name[3:].replace("_", "").lower()
-    if name in _KEEP_PROPS:
-        return name
-    if name in ("class_", "cls", "className"):
-        return "class"
-    return name.rstrip("_").replace("_", "-")
+    mapped = _PROP_NAMES.get(name)
+    if mapped is None:
+        if name.startswith("on_"):
+            mapped = "on:" + name[3:].replace("_", "").lower()
+        elif name in _KEEP_PROPS:
+            mapped = name
+        elif name in ("class_", "cls", "className"):
+            mapped = "class"
+        else:
+            mapped = name.rstrip("_").replace("_", "-")
+        if len(_PROP_NAMES) < _CACHE_MAX:
+            _PROP_NAMES[name] = mapped
+    return mapped
 
 
 def class_names(value) -> str:
@@ -150,6 +165,10 @@ def flatten(children, out=None) -> list:
     if out is None:
         out = []
     for child in children:
+        kind = type(child)
+        if kind is VNode or kind is str:      # the common case, in one type check
+            out.append(child)
+            continue
         if child is None or child is True or child is False:
             continue
         if isinstance(child, (VNode, str)):
@@ -368,74 +387,140 @@ def render_component(comp: Component, props, children):
     return result
 
 
+# What a node put in the output. _render_children needs to tell "emitted nothing" from
+# "emitted an element" to know where an adjacent-text marker belongs, and returning it is
+# cheaper than measuring the output list before and after every child.
+NOTHING, TEXT, ELEMENT = 0, 1, 2
+
+
+def _escape_text(text: str) -> str:
+    """``html.escape`` does three passes over the string. Most text has nothing to
+    escape, and the membership tests are cheaper than the replaces they skip."""
+    if "&" in text or "<" in text or ">" in text:
+        return _html.escape(text, quote=False)
+    return text
+
+
+def _escape_attr(value: str) -> str:
+    if "&" in value or "<" in value or ">" in value or '"' in value or "'" in value:
+        return _html.escape(value, quote=True)
+    return value
+
+
+def _attr_verdict(name: str) -> int:
+    """0 = drop the attribute, 1 = safe, 2 = safe but the value is a URL.
+
+    The answer depends only on the name, so it is worked out once per distinct name
+    rather than running two regexes and two set lookups on every node.
+    """
+    verdict = _ATTR_VERDICT.get(name)
+    if verdict is None:
+        if name.startswith("on:") or name == "ref" or name == "inner_html":
+            verdict = 0                      # handled elsewhere, never emitted as an attribute
+        elif not _VALID_ATTR.match(name):
+            verdict = 0                      # names that would inject markup/handlers
+        elif _EVENT_ATTR.match(name) or name.lower() in _BLOCKED_ATTRS:
+            verdict = 0                      # inline on* handlers and srcdoc
+        else:
+            verdict = 2 if name in _URL_ATTRS else 1
+        if len(_ATTR_VERDICT) < _CACHE_MAX:  # prop names can come from data: stay bounded
+            _ATTR_VERDICT[name] = verdict
+    return verdict
+
+
+_ATTR_VERDICT: dict[str, int] = {}
+
+
 def render_to_string(node) -> str:
     out: list[str] = []
     _render(node, out, None)
     return "".join(out)
 
 
-def _render(node, out, select_value) -> bool:
-    """Append HTML for ``node``; returns True when it emitted a bare text node."""
-    if node is None or node is True or node is False:
-        return False
-    if isinstance(node, (list, tuple)):
-        _render_children(flatten(node), out, select_value)
-        return False
-    if not isinstance(node, VNode):
-        out.append(_html.escape(str(node), quote=False))
-        return True
-    if isinstance(node.type, Component):
-        return _render(render_component(node.type, node.props, node.children), out, select_value)
+def _render(node, out, select_value) -> int:
+    """Append HTML for ``node``; returns NOTHING / TEXT / ELEMENT for what it emitted.
 
-    tag = node.type
-    tl = _VALIDATED_TAGS.get(tag)
-    if tl is None:
+    ``node`` is either a live VNode or a node from :func:`serialize`. Accepting both
+    lets the page path render straight from the serialised tree, so the HTML and the
+    data the browser hydrates from are one object, with no rebuilt tree in between.
+    """
+    if isinstance(node, str):
+        out.append(_escape_text(node))
+        return TEXT
+    if isinstance(node, VNode):
+        if isinstance(node.type, Component):
+            return _render(render_component(node.type, node.props, node.children), out, select_value)
+        tag, props, children = node.type, node.props, node.children
+    elif node is None or node is True or node is False:
+        return NOTHING
+    elif isinstance(node, dict):
+        component_id = node.get("C")
+        if component_id is not None:
+            component = COMPONENTS.get(component_id)
+            if component is None:
+                raise JongoError(f"unknown component {component_id!r}")
+            # Component output is live UI (it can hold event handlers and refs, which
+            # serialize() rejects), so it renders through the VNode path from here down.
+            return _render(render_component(component, revive(node.get("p") or {}),
+                                            [build(child) for child in node.get("c", ())]),
+                           out, select_value)
+        tag, props, children = node["t"], node.get("p") or {}, node.get("c", ())
+    elif isinstance(node, (list, tuple)):
+        start = len(out)
+        _render_children(flatten(node), out, select_value)
+        return ELEMENT if len(out) > start else NOTHING
+    else:
+        out.append(_escape_text(str(node)))
+        return TEXT
+
+    parts = _VALIDATED_TAGS.get(tag)
+    if parts is None:
         if not _VALID_TAG.match(tag):
             raise JongoError(f"invalid tag name {tag!r}: tag names must be letters, digits and hyphens")
-        tl = _VALIDATED_TAGS[tag] = tag.lower()   # one regex per distinct tag, not per node
-    props = node.props
+        parts = (tag.lower(), "<" + tag, "</" + tag + ">")   # once per distinct tag, not per node
+        if len(_VALIDATED_TAGS) < _CACHE_MAX:
+            _VALIDATED_TAGS[tag] = parts
+    tl, open_tag, close_tag = parts
     if tl == "option" and select_value is not None and "selected" not in props:
         props = {**props, "selected": str(props.get("value")) == str(select_value)}
-    out.append("<" + tag)
+    out.append(open_tag)
     _render_attrs(tl, props, out)
     out.append(">")
     if tl in VOID_TAGS:
-        return False
+        return ELEMENT
     if "inner_html" in props:
         out.append(str(props["inner_html"] or ""))
     elif tl == "textarea" and props.get("value") is not None:
-        out.append(_html.escape(str(props["value"]), quote=False))
+        out.append(_escape_text(str(props["value"])))
     elif tl in RAW_TEXT_TAGS:
-        for child in node.children:
+        for child in children:
             out.append(str(child).replace("</", "<\\/"))
     else:
         child_select = props.get("value") if tl == "select" else select_value
-        _render_children(node.children, out, child_select)
-    out.append(f"</{tag}>")
-    return False
+        _render_children(children, out, child_select)
+    out.append(close_tag)
+    return ELEMENT
 
 
 def _render_children(children, out, select_value):
     previous_text = False
     for child in children:
-        start = len(out)
-        if isinstance(child, str) and previous_text:
+        if previous_text and isinstance(child, str):
             out.append("<!---->")  # keeps adjacent text nodes separate for hydration
-            start = len(out)
-        emitted_text = _render(child, out, select_value)
-        if len(out) > start:
-            previous_text = emitted_text
+        emitted = _render(child, out, select_value)
+        if emitted:                # NOTHING leaves the flag alone, as an empty child should
+            previous_text = emitted is TEXT
 
 
 def _render_attrs(tag, props, out):
+    value_is_content = tag == "textarea" or tag == "select"   # once per node, not per prop
     for name, value in props.items():
-        if name.startswith("on:") or name in ("ref", "inner_html"):
-            continue
-        if tag == "textarea" and name == "value":
-            continue
-        if tag == "select" and name == "value":
-            continue
+        verdict = _attr_verdict(name)
+        if verdict == 0:
+            continue  # on:* handlers, ref, inner_html, invalid names and srcdoc
         if value is None or value is False:
+            continue
+        if value_is_content and name == "value":
             continue
         if name == "class":
             value = class_names(value)
@@ -445,16 +530,15 @@ def _render_attrs(tag, props, out):
             value = style_text(value)
             if not value:
                 continue
-        if not _VALID_ATTR.match(name):
-            continue  # drop names that would inject markup/handlers
-        if _EVENT_ATTR.match(name) or name.lower() in _BLOCKED_ATTRS:
-            continue  # inline on* handlers and srcdoc are never settable from data
-        if name in _URL_ATTRS and value is not True and _is_dangerous_url(value):
-            continue  # neutralize javascript:/vbscript:/data:text/html URLs
+        elif type(value) is dict and len(value) == 1 and "$v" in value:
+            value = build(value["$v"])   # an embedded node arriving from serialised data
         if value is True:
             out.append(" " + name)
-        else:
-            out.append(f' {name}="{_html.escape(str(value), quote=True)}"')
+            continue
+        if verdict == 2 and _is_dangerous_url(value):
+            continue  # neutralize javascript:/vbscript:/data:text/html URLs
+        out.append(' ' + name + '="'
+                   + _escape_attr(value if type(value) is str else str(value)) + '"')
 
 
 # ---------------------------------------------------------------------------
@@ -498,8 +582,34 @@ def _unescape_key(k: str) -> str:
     return k[1:] if k.startswith("$$") and _SENTINEL_KEY.match(k) else k
 
 
+_MISSING = object()
+_PROP_KEYS: dict[str, "str | None"] = {}
+
+
+def _prop_key(name: str):
+    """The serialised name for an element prop, or None for the props that cannot cross
+    the wire (``on:*`` handlers and ``ref``).
+
+    Memoised: this ran a ``startswith`` and a regex for every prop of every node, and the
+    answer only ever depends on the name.
+    """
+    key = _PROP_KEYS.get(name, _MISSING)
+    if key is _MISSING:
+        # Escape the $v-family in element prop NAMES too, so div(**{"$v": nodeData})
+        # can't be revived into a live VNode (component prop names go through to_json_data).
+        key = None if (name.startswith("on:") or name == "ref") else _escape_key(name)
+        if len(_PROP_KEYS) < _CACHE_MAX:
+            _PROP_KEYS[name] = key
+    return key
+
+
 def to_json_data(value, where: str = "value"):
     """Convert ``value`` to plain JSON data the browser can receive."""
+    kind = type(value)                       # exact-type fast path for the common scalars
+    if kind is str or kind is int or kind is bool or value is None:
+        return value
+    if kind is float:
+        return value if math.isfinite(value) else None
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, float):
@@ -552,16 +662,18 @@ def serialize(node):
     else:
         props = {}
         for name, value in node.props.items():
-            if name.startswith("on:") or name == "ref":
+            key = _prop_key(name)
+            if key is None:
                 if value is None:
                     continue
                 raise JongoError(
                     f"<{node.type} {name.replace('on:', 'on_')}=...> is outside any @component. Event handlers "
                     "and refs run in the browser, so move this markup into a @component function"
                 )
-            # Escape the $v-family in element prop NAMES too, so div(**{"$v": nodeData})
-            # can't be revived into a live VNode (component prop names go through to_json_data).
-            props[_escape_key(name)] = to_json_data(value, f"<{node.type}> {name}")
+            try:
+                props[key] = to_json_data(value)
+            except JongoError as exc:   # the context costs an f-string per prop if built up front
+                raise JongoError(f"<{node.type}> {name}: {exc}") from None
         data = {"t": node.type, "p": props}
     if node.children:
         data["c"] = [serialize(c) for c in node.children]

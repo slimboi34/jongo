@@ -69,6 +69,25 @@ Four additions, and the bugs found while making them.
   node: about 10% off a render-heavy page (0.799 → 0.715 ms in-process, best of 7 × 300).
   The round trip through `serialize()` is kept — it is what stops the server's HTML and the
   browser's hydration diverging.
+- **The HTML is now rendered from that serialised tree itself, not from a second VNode tree
+  rebuilt out of it.** `build()` was a whole extra pass and a whole extra tree on every page
+  render, and reading the data directly is the stronger form of the same guarantee: the HTML
+  and the browser's hydration data are one object, with nothing in between that could differ.
+- **The per-node work that depends only on a name is memoised.** Attribute validation (two
+  regexes and two set lookups for every attribute of every node), `prop_name`, and
+  `serialize`'s per-prop key handling each cost one dict lookup now, and the error-context
+  string `serialize` built for every prop is built only when a prop actually fails. Escaping
+  tests for the characters before calling `html.escape`, `_render_children` reports what it
+  emitted instead of measuring the output list around every child, and each tag's `"<tag"` /
+  `"</tag>"` strings are built once per distinct tag. Every cache is bounded, because prop
+  names can arrive from data.
+- Together, on a page shaped like a real app — 100 rows, every element carrying classes,
+  styles, `data-*` and a link — 1.769 → 0.967 ms in-process (best of 7 × 200): rendering
+  2.3× faster, serialising 1.5× faster. End to end under gunicorn, `/rows` went from 633 to
+  782 req/s (means of four interleaved runs per arm; `/json`, which renders nothing, did not
+  move). Output is byte-identical: HTML and JSON hashes match the previous implementation
+  across components, adjacent text nodes, forms, unicode, and the escaping, dangerous-URL
+  and `srcdoc` cases.
 
 ### Documentation
 
