@@ -12,6 +12,9 @@ import pytest
 
 from jongo import db
 from jongo.db import connection, models as models_module
+from jongo.db.migrate import introspect as introspect_table, live_tables
+
+from conftest import on_postgres, sqlite_only, use_test_database
 
 
 @pytest.fixture(autouse=True)
@@ -20,7 +23,7 @@ def memory_db():
     saved_registry = dict(db.models_registry)
     saved_database = connection._database
     db.models_registry.clear()
-    db.configure(":memory:")
+    use_test_database()
     yield
     db.close_connections()
     db.models_registry.clear()
@@ -91,14 +94,20 @@ def count_selects():
 
 class TestConnection:
     def test_parse_urls(self, tmp_path):
-        assert connection._parse_url(":memory:") == ":memory:"
-        assert connection._parse_url("sqlite:///:memory:") == ":memory:"
-        assert connection._parse_url("sqlite://") == ":memory:"
-        assert connection._parse_url(f"sqlite:///{tmp_path}/abs.sqlite3") == str(tmp_path / "abs.sqlite3")
-        assert connection._parse_url("sqlite:///rel.sqlite3").endswith("/rel.sqlite3")
-        assert connection._parse_url(tmp_path / "plain.sqlite3") == str(tmp_path / "plain.sqlite3")
+        assert connection._parse_url(":memory:") == ("sqlite", ":memory:")
+        assert connection._parse_url("sqlite:///:memory:") == ("sqlite", ":memory:")
+        assert connection._parse_url("sqlite://") == ("sqlite", ":memory:")
+        assert connection._parse_url(f"sqlite:///{tmp_path}/abs.sqlite3") == ("sqlite", str(tmp_path / "abs.sqlite3"))
+        assert connection._parse_url("sqlite:///rel.sqlite3")[1].endswith("/rel.sqlite3")
+        assert connection._parse_url(tmp_path / "plain.sqlite3") == ("sqlite", str(tmp_path / "plain.sqlite3"))
+
+    def test_parse_postgres_urls(self):
+        assert connection._parse_url("postgres://localhost/app") == ("postgres", "postgres://localhost/app")
+        assert connection._parse_url("postgresql://u:p@host:5432/app")[0] == "postgres"
         with pytest.raises(ValueError):
-            connection._parse_url("postgres://localhost/app")
+            connection._parse_url("mysql://localhost/app")
+        with pytest.raises(ValueError):
+            connection._parse_url("")
 
     def test_default_database_from_env_or_cwd(self, tmp_path, monkeypatch):
         db.close_connections()
@@ -111,6 +120,7 @@ class TestConnection:
         monkeypatch.chdir(tmp_path)
         assert db.database_path() == str(tmp_path / "db.sqlite3")
 
+    @sqlite_only
     def test_execute_and_query(self):
         db.execute("CREATE TABLE things (id INTEGER PRIMARY KEY, name TEXT)")
         cursor = db.execute("INSERT INTO things (name) VALUES (?)", ["widget"])
@@ -129,9 +139,11 @@ class TestConnection:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert (tmp_path / "app.sqlite3").exists()
 
+    @sqlite_only
     def test_memory_connection_has_foreign_keys(self):
         assert db.get_connection().execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
+    @sqlite_only
     def test_configure_again_closes_connections(self, tmp_path):
         conn = db.get_connection()
         db.configure(tmp_path / "other.sqlite3")
@@ -139,6 +151,7 @@ class TestConnection:
             conn.execute("SELECT 1")
         assert db.get_connection() is not conn
 
+    @sqlite_only
     def test_memory_database_is_shared_between_threads(self):
         db.execute("CREATE TABLE shared (value TEXT)")
         seen = {}
@@ -946,7 +959,7 @@ class TestRelations:
         db.migrate([Team, Player])
         team = Team.create(name="red")
         Player.create(team=team)
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(db.integrity_error()):
             team.delete()
 
     def test_self_reference_and_late_target(self):
@@ -982,11 +995,32 @@ class TestRelations:
 
 
 def columns(table):
-    return {row["name"]: row for row in db.query(f'PRAGMA table_info("{table}")')}
+    """The live columns, in the shape SQLite's PRAGMA returns, from either backend."""
+    with connection.locked() as conn:
+        schema = introspect_table(conn, table)
+    return {
+        column.name: {"name": column.name, "type": column.type, "notnull": int(column.notnull),
+                      "pk": int(column.pk), "dflt_value": column.default}
+        for column in schema.columns.values()
+    }
 
 
 def indexes(table):
-    return {row["name"]: bool(row["unique"]) for row in db.query(f'PRAGMA index_list("{table}")')}
+    with connection.locked() as conn:
+        schema = introspect_table(conn, table)
+    return {index.name: bool(index.unique) for index in schema.indexes if index.origin != "pk"}
+
+
+def foreign_keys(table):
+    """Foreign keys as ``{column: (target table, target column, on delete)}``."""
+    with connection.locked() as conn:
+        schema = introspect_table(conn, table)
+    return {c.name: c.references for c in schema.columns.values() if c.references}
+
+
+def table_names():
+    with connection.locked() as conn:
+        return set(live_tables(conn))
 
 
 class TestMigrations:
@@ -997,8 +1031,7 @@ class TestMigrations:
         cols = columns("todos")
         assert cols["title"]["notnull"] == 1 and cols["notes"]["notnull"] == 0 and cols["id"]["pk"] == 1
         assert cols["done"]["type"] == "INTEGER" and cols["data"]["type"] == "TEXT"
-        fks = db.query('PRAGMA foreign_key_list("todos")')
-        assert [(fk["table"], fk["from"], fk["on_delete"]) for fk in fks] == [("user", "owner_id", "SET NULL")]
+        assert foreign_keys("todos") == {"owner_id": ("user", "id", "SET NULL")}
         assert indexes("user") == {"ux_user_username": True}
         assert indexes("todos") == {"ix_todos_owner_id": False}
         assert db.plan_migrations() == []
@@ -1017,7 +1050,7 @@ class TestMigrations:
         assert 'CREATE INDEX "ix_note_text" ON "note" ("text")' in op.sql
         results = db.migrate(dry_run=True)
         assert [(result.kind, applied) for result, applied in results] == [("create_table", False)]
-        assert "note" not in {row["name"] for row in db.query("SELECT name FROM sqlite_master")}
+        assert "note" not in table_names()
 
     def test_add_columns(self):
         class Post(db.Model):
@@ -1092,17 +1125,24 @@ class TestMigrations:
             points = db.Int()
 
         plan = db.plan_migrations()
-        assert [op.kind for op in plan] == ["rebuild_table"]
-        assert not plan[0].destructive and plan[0].rebuild
-        assert "change the type of" in plan[0].describe()
-        assert 'new_score' in plan[0].sql[0]
+        assert not plan[0].destructive
+        if on_postgres():  # PostgreSQL alters the column in place
+            assert [op.kind for op in plan] == ["alter_column"]
+            assert "Change the type of" in plan[0].describe()
+            assert "ALTER COLUMN" in plan[0].sql[0]
+        else:  # SQLite has to rebuild the table around the new column
+            assert [op.kind for op in plan] == ["rebuild_table"]
+            assert plan[0].rebuild
+            assert "change the type of" in plan[0].describe()
+            assert 'new_score' in plan[0].sql[0]
         db.migrate()
         assert columns("score")["points"]["type"] == "INTEGER"
         assert Score.get(id=first.pk).points == 12
         assert Score.filter(points__gt=10).get().player == "ann"
         assert set(indexes("score")) == {"ix_score_player", "custom_points"}
         assert Score.create(player="cat", points=1).pk == 3
-        assert db.get_connection().execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        if not on_postgres():  # SQLite turns FK enforcement off around a rebuild, then back on
+            assert db.get_connection().execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert db.plan_migrations() == []
 
     def test_rebuild_keeps_extra_columns_and_children(self, people):
@@ -1131,11 +1171,13 @@ class TestMigrations:
 
         results = db.migrate()
         kinds = {(op.table, op.kind, applied) for op, applied in results}
-        assert ("todos", "rebuild_table", True) in kinds and ("user", "rebuild_table", True) in kinds
+        change = "alter_column" if on_postgres() else "rebuild_table"
+        assert ("todos", change, True) in kinds and ("user", change, True) in kinds
         assert ("user", "drop_column", False) in kinds
         assert db.query('SELECT nickname FROM "user" WHERE username = \'alice\'') == [{"nickname": "ally"}]
         assert Todo.count() == 4 and people.Comment.count() == 1
-        fks = db.query('PRAGMA foreign_key_list("todos")')
+        fks = [{"table": ref[0], "from": name, "on_delete": ref[2]}
+               for name, ref in foreign_keys("todos").items()]
         assert fks[0]["on_delete"] == "CASCADE"
         assert indexes("todos") == {"ix_todos_owner_id": False}
         assert db.plan_migrations()[0].kind == "drop_column"
@@ -1158,7 +1200,8 @@ class TestMigrations:
             label = db.Text(default="untitled")
 
         (op,) = db.plan_migrations()
-        assert op.kind == "rebuild_table" and 'NOT NULL' in op.describe()
+        assert op.kind == ("alter_column" if on_postgres() else "rebuild_table")
+        assert 'NOT NULL' in op.describe()
         db.migrate()
         assert list(Task.all().order_by("id").values_list("label", flat=True)) == ["untitled", "set"]
         assert columns("task")["label"]["notnull"] == 1
@@ -1182,17 +1225,20 @@ class TestMigrations:
         db.migrate()
         assert indexes("tag") == {"ux_tag_slug": True}
         Tag.create(name="a", slug="a")
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(db.integrity_error()):
             db.execute("INSERT INTO tag (name, slug) VALUES ('b', 'a')")
 
     def test_legacy_unique_constraint_is_removed_by_rebuild(self):
-        db.execute('CREATE TABLE "code" ("id" INTEGER PRIMARY KEY AUTOINCREMENT, "value" TEXT NOT NULL UNIQUE)')
+        pk = ("BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY" if on_postgres()
+              else "INTEGER PRIMARY KEY AUTOINCREMENT")
+        db.execute(f'CREATE TABLE "code" ("id" {pk}, "value" TEXT NOT NULL UNIQUE)')
 
         class Code(db.Model):
             value = db.Text()
 
         (op,) = db.plan_migrations()
-        assert op.kind == "rebuild_table" and "UNIQUE" in op.describe()
+        assert op.kind == ("drop_index" if on_postgres() else "rebuild_table")
+        assert "UNIQUE" in op.describe()
         db.migrate()
         Code.create(value="x")
         Code.create(value="x")
@@ -1211,8 +1257,11 @@ class TestMigrations:
             name = db.Text()
             owner = db.ForeignKey(Owner)
 
-        (op,) = db.plan_migrations()
-        assert op.kind == "rebuild_table"  # empty table: safe to rebuild
+        plan = db.plan_migrations()
+        if on_postgres():  # the column and its index are separate ALTERs
+            assert [op.kind for op in plan] == ["add_column", "create_index"]
+        else:  # empty table: safe to rebuild, and the rebuild recreates the index
+            assert [op.kind for op in plan] == ["rebuild_table"]
         db.execute("INSERT INTO pet (name) VALUES ('rex')")
         with pytest.raises(db.MigrationError, match="already has rows"):
             db.plan_migrations()
@@ -1222,7 +1271,8 @@ class TestMigrations:
             body = db.Text()
 
         (op,) = db.plan_migrations([Comment])
-        assert op.kind == "drop_column" and op.destructive and op.rebuild
+        assert op.kind == "drop_column" and op.destructive
+        assert op.rebuild is not on_postgres()  # PostgreSQL drops the column in place
         db.migrate([Comment], allow_destructive=True)
         assert set(columns("comment")) == {"id", "body"}
 
@@ -1237,7 +1287,7 @@ class TestMigrations:
         db.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT)")
         assert db.plan_migrations() == []
         db.migrate(allow_destructive=True)
-        assert db.query("SELECT name FROM sqlite_master WHERE name = 'audit_log'")
+        assert "audit_log" in table_names()
 
     def test_migrate_specific_models(self):
         class Alpha(db.Model):

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import copy
 import re
-import sqlite3
 from datetime import date, datetime
 from typing import Any
 
 from . import connection
 from .fields import DateTime, Field, ForeignKey, Int, ValidationError, utcnow
-from .query import DoesNotExist, MultipleObjectsReturned, Q, QuerySet, integrity_to_validation, quote
+from .query import (DoesNotExist, MultipleObjectsReturned, Q, QuerySet, integrity_error,
+                    integrity_to_validation, quote)
 
 models_registry: dict[str, type[Model]] = {}
 _relations: list[ForeignKey] = []
@@ -353,15 +353,21 @@ class Model(metaclass=ModelMeta):
                     if updated:
                         return self
                     columns, values = ['"id"', *columns], [self.pk, *values]
+                dialect = connection.dialect()
                 if columns:
                     placeholders = ", ".join("?" * len(columns))
                     sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
                 else:
                     sql = f"INSERT INTO {table} DEFAULT VALUES"
-                cursor = conn.execute(sql, values)
                 if self.pk is None:
-                    self.pk = cursor.lastrowid
-        except sqlite3.IntegrityError as exc:  # backstop (races, or a constraint full_clean can't pre-check)
+                    sql = dialect.insert(sql)  # PostgreSQL returns the generated id
+                explicit_id = self.pk is not None
+                cursor = conn.execute(sql, values)
+                if not explicit_id:
+                    self.pk = dialect.inserted_id(cursor)
+                else:
+                    dialect.after_explicit_id(conn, meta.table)
+        except integrity_error() as exc:  # backstop (races, or a constraint full_clean can't pre-check)
             raise (integrity_to_validation(exc, type(self)) or exc) from exc
         return self
 

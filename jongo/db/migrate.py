@@ -6,7 +6,6 @@ returns the operations needed to make it match the models; ``migrate()`` applies
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Iterable
 
@@ -32,11 +31,12 @@ class Column:
     default: str | None = None  # SQL literal
 
     def sql(self) -> str:
+        dialect = connection.dialect()
         parts = [quote(self.name)]
         if self.type:
-            parts.append(self.type)
+            parts.append(dialect.ddl_type(self.type))
         if self.pk:
-            parts.append("PRIMARY KEY AUTOINCREMENT")
+            parts.append(dialect.pk_ddl())
         elif self.notnull:
             parts.append("NOT NULL")
         if self.default is not None:
@@ -72,6 +72,8 @@ class TableSchema:
     columns: dict[str, Column]  # keyed by lower-cased column name, in table order
     indexes: list[Index]
     has_rows: bool
+    #: PostgreSQL foreign-key constraint names, keyed by lower-cased column name.
+    constraints: dict[str, str] = dataclass_field(default_factory=dict)
 
 
 @dataclass
@@ -153,12 +155,19 @@ def fill_literal(field: Field) -> str | None:
 # -- live schema ---------------------------------------------------------------------
 
 
-def live_tables(conn: sqlite3.Connection) -> dict[str, str]:
+def live_tables(conn) -> dict[str, str]:
+    if connection.is_postgres():
+        rows = conn.execute(
+            "SELECT tablename AS name FROM pg_tables WHERE schemaname = ANY (current_schemas(false))"
+        ).fetchall()
+        return {row["name"].lower(): row["name"] for row in rows}
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")
     return {row[0].lower(): row[0] for row in rows}
 
 
-def introspect(conn: sqlite3.Connection, table: str) -> TableSchema:
+def introspect(conn, table: str) -> TableSchema:
+    if connection.is_postgres():
+        return _introspect_postgres(conn, table)
     references: dict[str, tuple[str, str | None, str]] = {}
     groups: dict[int, list[sqlite3.Row]] = {}
     for row in conn.execute(f"PRAGMA foreign_key_list({quote(table)})"):
@@ -188,6 +197,80 @@ def introspect(conn: sqlite3.Connection, table: str) -> TableSchema:
     return TableSchema(table, columns, indexes, has_rows)
 
 
+_PG_ON_DELETE = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL", "d": "SET DEFAULT"}
+
+
+def _introspect_postgres(conn, table: str) -> TableSchema:
+    """Read a live PostgreSQL table into the same shape SQLite introspection returns."""
+    dialect = connection.dialect()
+    references: dict[str, tuple[str, str | None, str]] = {}
+    constraints: dict[str, str] = {}
+    fk_rows = conn.execute("""
+        SELECT c.conname AS name, a.attname AS column, t.relname AS target,
+               ta.attname AS target_column, c.confdeltype AS on_delete
+        FROM pg_constraint c
+        JOIN pg_class s ON s.oid = c.conrelid
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+        JOIN pg_class t ON t.oid = c.confrelid
+        JOIN pg_attribute ta ON ta.attrelid = c.confrelid AND ta.attnum = c.confkey[1]
+        WHERE c.contype = 'f' AND s.relname = ? AND array_length(c.conkey, 1) = 1
+    """, [table]).fetchall()
+    for row in fk_rows:
+        key = row["column"].lower()
+        references[key] = (row["target"], row["target_column"], _PG_ON_DELETE.get(row["on_delete"], "NO ACTION"))
+        constraints[key] = row["name"]
+
+    columns: dict[str, Column] = {}
+    column_rows = conn.execute("""
+        SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type,
+               a.attnotnull AS notnull, pg_get_expr(d.adbin, d.adrelid) AS default,
+               COALESCE(i.indisprimary, false) AS pk
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+        LEFT JOIN pg_index i ON i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY (i.indkey)
+        WHERE c.relname = ? AND a.attnum > 0 AND NOT a.attisdropped
+        ORDER BY a.attnum
+    """, [table]).fetchall()
+    for row in column_rows:
+        name = row["name"]
+        columns[name.lower()] = Column(
+            name, dialect.normalize_type(row["type"]), bool(row["notnull"]), bool(row["pk"]),
+            references.get(name.lower()), row["default"],
+        )
+
+    indexes: list[Index] = []
+    index_rows = conn.execute("""
+        SELECT i.relname AS name, ix.indisunique AS unique, ix.indisprimary AS primary,
+               ix.indpred IS NOT NULL AS partial,
+               (SELECT array_agg(att.attname ORDER BY k.ord)
+                  FROM unnest(ix.indkey::int[]) WITH ORDINALITY AS k(attnum, ord)
+                  LEFT JOIN pg_attribute att ON att.attrelid = ix.indrelid AND att.attnum = k.attnum
+               ) AS columns,
+               EXISTS (SELECT 1 FROM pg_constraint c
+                        WHERE c.conindid = ix.indexrelid AND c.contype IN ('u', 'p')) AS from_constraint,
+               pg_get_indexdef(ix.indexrelid) AS sql
+        FROM pg_index ix
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        WHERE t.relname = ?
+    """, [table]).fetchall()
+    for row in index_rows:
+        if row["primary"]:
+            origin = "pk"
+        elif row["from_constraint"]:
+            origin = "u"
+        else:
+            origin = "c"
+        indexes.append(Index(
+            row["name"], tuple(row["columns"] or ()), bool(row["unique"]),
+            origin, bool(row["partial"]), row["sql"],
+        ))
+
+    has_rows = conn.execute(f"SELECT 1 FROM {quote(table)} LIMIT 1").fetchone() is not None
+    return TableSchema(table, columns, indexes, has_rows, constraints)
+
+
 def _affinity(declared: str) -> str:
     declared = declared.upper()
     if "INT" in declared:
@@ -212,7 +295,7 @@ def _same_reference(old: tuple | None, new: tuple | None) -> bool:
 
 def plan_migrations(models: Iterable[type[Model]] | None = None) -> list[Operation]:
     """Return the operations needed to bring the database in line with ``models``."""
-    targets = _select_models(models)
+    targets = _order_by_dependencies(_select_models(models))
     operations: list[Operation] = []
     with connection.locked() as conn:
         tables = live_tables(conn)
@@ -223,6 +306,40 @@ def plan_migrations(models: Iterable[type[Model]] | None = None) -> list[Operati
             else:
                 operations.extend(_TablePlanner(model, introspect(conn, live_name), tables).plan())
     return operations
+
+
+def _order_by_dependencies(models: list[type[Model]]) -> list[type[Model]]:
+    """Order models so a foreign key's target table is created first.
+
+    SQLite tolerates a forward reference; PostgreSQL does not. Self-references are
+    fine either way, and a cycle between tables is left in its original order (the
+    backend reports it far more clearly than a guess here would).
+    """
+    by_table = {model._meta.table.lower(): model for model in models}
+    ordered: list[type[Model]] = []
+    seen: set[str] = set()
+
+    def visit(model: type[Model], stack: frozenset[str]) -> None:
+        key = model._meta.table.lower()
+        if key in seen or key in stack:
+            return
+        for field in model._meta.fields:
+            if not isinstance(field, ForeignKey):
+                continue
+            try:
+                target = field.related_model
+            except LookupError:
+                continue
+            target_key = target._meta.table.lower()
+            if target_key != key and target_key in by_table:
+                visit(by_table[target_key], stack | {key})
+        if key not in seen:
+            seen.add(key)
+            ordered.append(model)
+
+    for model in models:
+        visit(model, frozenset())
+    return ordered
 
 
 def _select_models(models: Iterable[type[Model]] | None) -> list[type[Model]]:
@@ -266,7 +383,12 @@ class _TablePlanner:
 
     def plan(self) -> list[Operation]:
         reasons = self._rebuild_reasons()
-        if reasons:
+        if reasons and not connection.dialect().rebuilds_tables:
+            operations = self._alter_operations()
+            operations.extend(self._add_column(column) for column in self.added
+                              if column.name.lower() not in self.live.columns)
+            operations.extend(self._index_operations())
+        elif reasons:
             operations = [self._rebuild(reasons)]
         else:
             operations = [self._add_column(column) for column in self.added]
@@ -308,6 +430,62 @@ class _TablePlanner:
                 if field is not None and not field.unique:
                     reasons.append(f"drop the UNIQUE constraint on {self._label(field.column)}")
         return reasons
+
+    def _alter_operations(self) -> list[Operation]:
+        """Native ALTERs for backends that can change a column in place (PostgreSQL)."""
+        dialect = connection.dialect()
+        table = quote(self.table)
+        operations: list[Operation] = []
+        for new in self.want:
+            old = self.live.columns.get(new.name.lower())
+            if old is None:
+                continue
+            column, label = quote(new.name), self._label(new.name)
+            if _affinity(old.type) != _affinity(new.type):
+                target = dialect.ddl_type(new.type)
+                operations.append(Operation(
+                    "alter_column", self.table,
+                    [f"ALTER TABLE {table} ALTER COLUMN {column} TYPE {target} USING {column}::{target}"],
+                    f"Change the type of {label} to {new.type}", column=new.name,
+                ))
+            if not new.pk and old.notnull != new.notnull:
+                if new.notnull:
+                    statements = []
+                    fill = fill_literal(self.fields[new.name.lower()]) if new.name.lower() in self.fields else None
+                    if fill is not None:
+                        statements.append(f"UPDATE {table} SET {column} = {fill} WHERE {column} IS NULL")
+                    statements.append(f"ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL")
+                    description = f"Make {label} NOT NULL"
+                else:
+                    statements = [f"ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL"]
+                    description = f"Make {label} nullable"
+                operations.append(Operation("alter_column", self.table, statements, description, column=new.name))
+            if not _same_reference(old.references, new.references):
+                statements = []
+                existing = self.live.constraints.get(new.name.lower())
+                if existing:
+                    statements.append(f"ALTER TABLE {table} DROP CONSTRAINT {quote(existing)}")
+                if new.references:
+                    target_table, target_column, on_delete = new.references
+                    statements.append(
+                        f"ALTER TABLE {table} ADD CONSTRAINT {quote(f'fk_{self.table}_{new.name}')} "
+                        f"FOREIGN KEY ({column}) REFERENCES {quote(target_table)} "
+                        f"({quote(target_column or 'id')}) ON DELETE {on_delete}"
+                    )
+                operations.append(Operation(
+                    "alter_column", self.table, statements,
+                    f"Change the foreign key on {label}", column=new.name,
+                ))
+        for index in self.live.indexes:
+            if index.origin == "u" and len(index.columns) == 1:
+                field = self.fields.get((index.columns[0] or "").lower())
+                if field is not None and not field.unique:
+                    operations.append(Operation(
+                        "drop_index", self.table,
+                        [f"ALTER TABLE {table} DROP CONSTRAINT {quote(index.name)}"],
+                        f'Drop the UNIQUE constraint on {self._label(field.column)}',
+                    ))
+        return operations
 
     def _add_column(self, column: Column) -> Operation:
         field = self.fields[column.name.lower()]
@@ -421,7 +599,13 @@ class _TablePlanner:
         return operations
 
     def _can_alter_drop(self, column: Column) -> bool:
-        if sqlite3.sqlite_version_info < (3, 35, 0) or column.pk or column.references:
+        if column.pk:
+            return False
+        if not connection.dialect().rebuilds_tables:
+            return True  # PostgreSQL drops a column (and its dependent objects) natively
+        import sqlite3
+
+        if sqlite3.sqlite_version_info < (3, 35, 0) or column.references:
             return False
         for index in self.live.indexes:
             touches = any((name or "").lower() == column.name.lower() for name in index.columns)
@@ -450,7 +634,7 @@ def migrate(
 
     rebuilt = list(dict.fromkeys(op.table for op in selected if op.rebuild))
     with connection.locked() as conn:
-        if rebuilt:
+        if rebuilt:  # SQLite only: rebuilds detach children, so FK enforcement pauses
             if conn.in_transaction:
                 raise MigrationError("migrate() cannot rebuild tables inside an open transaction.")
             conn.execute("PRAGMA foreign_keys=OFF")
@@ -471,9 +655,11 @@ def migrate(
     return [(op, id(op) in applied) for op in operations]
 
 
-def _apply(conn: sqlite3.Connection, op: Operation) -> None:
+def _apply(conn, op: Operation) -> None:
     for statement in op.sql:
         try:
             conn.execute(statement)
-        except sqlite3.DatabaseError as exc:
+        except Exception as exc:  # any driver's DatabaseError
+            if isinstance(exc, MigrationError):
+                raise
             raise MigrationError(f"{op.describe()} failed: {exc}") from exc

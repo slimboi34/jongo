@@ -220,11 +220,40 @@ with db.transaction():
 
 - **Fields:** `Text Int Float Bool DateTime Date JSON ForeignKey`.
 - **Lookups:** `exact iexact contains icontains startswith endswith gt gte lt lte in isnull ne`, plus relation traversal with `__`.
-- **Migrations have no files.** `jongo migrate` compares your models to the live SQLite schema.
-  - It creates tables, adds columns and indexes, and rebuilds a table when a column's type changes.
+- **Migrations have no files.** `jongo migrate` compares your models to the live schema.
+  - It creates tables, adds columns and indexes, and changes a column when its type changes.
   - It only drops columns when you pass `--allow-destructive`.
   - `jongo migrate --plan` shows the SQL first.
   - `jongo dev` applies the safe changes automatically.
+
+### SQLite or PostgreSQL
+
+SQLite is the default and needs no setup. Point the same models at PostgreSQL with a URL:
+
+```python
+app = Jongo(__name__, database="postgres://user:pw@localhost/app")
+# or: JONGO_DATABASE=postgres://user:pw@localhost/app
+```
+
+```bash
+pip install "jongo[postgres]"    # adds the psycopg driver; the core stays dependency-free
+```
+
+Nothing else changes — the same models, queries, migrations and tests run on both, and the
+test suite is run against both. The backends differ only where the database does:
+
+| | SQLite | PostgreSQL |
+|---|---|---|
+| Changing a column | rebuilds the table | `ALTER TABLE … ALTER COLUMN` |
+| Dropping a column | rebuilds when the column is referenced | drops in place |
+| Case-sensitive `contains` | `GLOB` | `LIKE` |
+| Case-insensitive `icontains` | `LIKE` | `ILIKE` |
+| New row ids | `AUTOINCREMENT` | identity column, kept in step with explicit ids |
+
+Both store the same representations — datetimes and dates as ISO-8601 text, booleans as
+integers, JSON as text — so a model behaves identically on either one. That is a deliberate
+trade for consistency: it means no value changes meaning when you move an app from SQLite to
+PostgreSQL, at the cost of not using `timestamptz`/`jsonb` natively.
 
 ## Auth and admin
 

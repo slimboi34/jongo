@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 from jongo import HTTPError, Jongo, ServerError, component, css, db, server
+
+from conftest import use_test_database
 from jongo.auth import User, verify_password
 from jongo.compiler.bundle import Bundler
 from jongo.errors import JongoError
@@ -206,7 +208,7 @@ def test_verify_password_never_crashes_on_bad_hash():
 
 @pytest.fixture
 def memdb():
-    db.configure(":memory:")
+    use_test_database()
     yield
     db.close_connections()
 

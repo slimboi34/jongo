@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 
 from jongo import HTTPError, Jongo, ServerError, db, server
+
+from conftest import use_test_database
 from jongo.compiler.bundle import Bundler
 from jongo.errors import JongoError
 from jongo.html import a, div, h, iframe, img
@@ -160,7 +162,7 @@ def test_h6_set_cookie_bad_path_clean_error():
 
 @pytest.fixture
 def memdb():
-    db.configure(":memory:")
+    use_test_database()
     yield
     db.close_connections()
 

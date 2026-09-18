@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -10,28 +9,50 @@ from . import connection
 from .fields import DateTime, Field, ForeignKey, ValidationError, utcnow
 
 
-def integrity_to_validation(exc: "sqlite3.IntegrityError", model) -> "ValidationError | None":
-    """Map a raw sqlite IntegrityError to a field-scoped ValidationError, or None to re-raise."""
-    msg = str(exc)
-    meta = model._meta
+def integrity_error() -> tuple[type[Exception], ...]:
+    """The driver's integrity-error types, for the active backend."""
+    return connection.dialect().integrity_errors()
 
-    def field_for(ref: str):
-        col = ref.split(".")[-1].strip()
-        return next((f for f in meta.fields if f.column == col), None)
+
+def integrity_to_validation(exc: Exception, model) -> "ValidationError | None":
+    """Map a driver integrity error to a field-scoped ValidationError, or None to re-raise."""
+    meta = model._meta
+    classified = connection.dialect().constraint_violation(exc)
+    if classified is None:
+        return None
+    kind, ref = classified
+
+    def field_for(ref: str | None):
+        """Find the field a constraint refers to, by column or by index name."""
+        if not ref:
+            return None
+        name = ref.split(".")[-1].strip().strip('"')
+        field = next((f for f in meta.fields if f.column == name), None)
+        if field is not None:
+            return field
+        prefix = f"{meta.table}_"  # PostgreSQL names the index: ux_<table>_<column>
+        for marker in ("ux_", "ix_"):
+            if name.startswith(marker) and name[len(marker):].startswith(prefix):
+                column = name[len(marker) + len(prefix):]
+                return next((f for f in meta.fields if f.column == column), None)
+        return None
 
     vn = meta.verbose_name[:1].upper() + meta.verbose_name[1:]
-    if "UNIQUE constraint failed" in msg:
-        field = field_for(msg.split(":", 1)[1]) if ":" in msg else None
+    if kind == "unique":
+        field = field_for(ref)
         name = field.name if field else "__all__"
         label = field.label.lower() if field else "value"
         return ValidationError({name: f"{vn} with this {label} already exists."})
-    if "NOT NULL constraint failed" in msg:
-        field = field_for(msg.split(":", 1)[1]) if ":" in msg else None
+    if kind == "notnull":
+        field = field_for(ref)
         return ValidationError({(field.name if field else "__all__"): "This field is required."})
-    if "FOREIGN KEY constraint failed" in msg:  # sqlite doesn't name the column
+    if kind == "foreign_key":  # sqlite doesn't name the column
+        field = field_for(ref)
         fks = [f for f in meta.fields if isinstance(f, ForeignKey)]
-        name = fks[0].name if len(fks) == 1 else "__all__"
-        target = fks[0].related_model._meta.verbose_name if len(fks) == 1 else "related object"
+        if field is None and len(fks) == 1:
+            field = fks[0]
+        name = field.name if field else "__all__"
+        target = field.related_model._meta.verbose_name if field is not None else "related object"
         return ValidationError({name: f"Select a valid choice; that {target} does not exist."})
     return None
 
@@ -146,7 +167,7 @@ def compile_q(model: type[Model], q: Q) -> tuple[str, list] | None:
     sql = parts[0] if len(parts) == 1 else f" {q.connector} ".join(f"({part})" for part in parts)
     if q.negated:
         # COALESCE makes NULL comparisons count as "no match" so they survive the NOT.
-        sql = f"NOT COALESCE(({sql}), 0)"
+        sql = connection.dialect().negate(sql)
     return sql, params
 
 
@@ -168,30 +189,47 @@ def compile_lookup(model: type[Model], key: str, value: Any) -> tuple[str, list]
     return sql, params
 
 
+NEVER_MATCHES = ("0 = 1", [])
+_NUMERIC_KINDS = ("int", "float", "fk")
+
+
+def _db_value(field: Field, value: Any) -> tuple[bool, Any]:
+    """Convert a lookup value for the wire.
+
+    Returns ``(False, None)`` when the value cannot be what the column holds — a
+    numeric column compared against "not a number". SQLite compares those as text
+    and simply matches nothing; PostgreSQL rejects the parameter outright, so the
+    comparison is dropped here and both backends behave the same.
+    """
+    converted = field.to_db(value)
+    if field.kind in _NUMERIC_KINDS and isinstance(converted, str):
+        return False, None
+    return True, converted
+
+
 def _condition(field: Field, lookup: str, value: Any) -> tuple[str, list]:
     column = quote(field.column)
     if lookup == "exact":
         if value is None:
             return f"{column} IS NULL", []
-        return f"{column} = ?", [field.to_db(value)]
+        ok, converted = _db_value(field, value)
+        return (f"{column} = ?", [converted]) if ok else NEVER_MATCHES
     if lookup == "ne":
-        return f"{column} IS NOT ?", [None if value is None else field.to_db(value)]
+        if value is None:
+            return connection.dialect().not_equal(column), [None]
+        ok, converted = _db_value(field, value)
+        return (connection.dialect().not_equal(column), [converted]) if ok else (f"{column} IS NOT NULL", [])
     if lookup == "isnull":
         return (f"{column} IS NULL" if value else f"{column} IS NOT NULL"), []
     if lookup in COMPARISONS:
-        return f"{column} {COMPARISONS[lookup]} ?", [field.to_db(value)]
+        ok, converted = _db_value(field, value)
+        return (f"{column} {COMPARISONS[lookup]} ?", [converted]) if ok else NEVER_MATCHES
     if lookup == "in":
         return _in_condition(field, column, value)
     if value is None and lookup == "iexact":
         return f"{column} IS NULL", []
     text = value if isinstance(value, str) else str(field.to_db(value))
-    if lookup == "iexact":
-        return f"{column} LIKE ? ESCAPE '\\'", [escape_like(text)]
-    if lookup.startswith("i"):
-        pattern = {"icontains": "%{}%", "istartswith": "{}%", "iendswith": "%{}"}[lookup]
-        return f"{column} LIKE ? ESCAPE '\\'", [pattern.format(escape_like(text))]
-    pattern = {"contains": "*{}*", "startswith": "{}*", "endswith": "*{}"}[lookup]
-    return f"{column} GLOB ?", [pattern.format(escape_glob(text))]
+    return connection.dialect().text_condition(column, lookup, text)
 
 
 def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
@@ -200,13 +238,16 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
         return f"{column} IN ({sql})", params
     if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
         raise TypeError(f'The "in" lookup expects a list, tuple, set or QuerySet, not {type(value).__name__}.')
-    values = [field.to_db(item) for item in value]
+    converted = [_db_value(field, item) for item in value]
+    values = [item for ok, item in converted if ok or item is None]
+    if not values and converted:  # every candidate was an impossible value
+        return NEVER_MATCHES
     present = [item for item in values if item is not None]
     has_null = len(present) != len(values)
     conditions: list[str] = []
     params: list = []
     if present:
-        literals = [_sqlite_literal(v) for v in present]
+        literals = [_sql_literal(v) for v in present]
         if all(lit is not None for lit in literals):
             # Inline SQL-safe literals so a huge __in list can't exceed SQLite's bound-variable
             # limit (which counts total "?", so OR-chunking bound params would not help).
@@ -223,7 +264,7 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
     return f"({' OR '.join(conditions)})", params
 
 
-def _sqlite_literal(value):
+def _sql_literal(value):
     """A safe inline SQL literal for common types, or None if it must be a bound parameter."""
     if isinstance(value, bool):
         return "1" if value else "0"
@@ -325,7 +366,7 @@ class QuerySet:
         try:
             with connection.transaction():
                 return self.create(**values), True
-        except (sqlite3.IntegrityError, ValidationError) as error:
+        except (*integrity_error(), ValidationError) as error:
             try:
                 return self.get(**lookups), False
             except self.model.DoesNotExist:
@@ -397,7 +438,7 @@ class QuerySet:
             cursor = connection.execute(
                 f"UPDATE {quote(meta.table)} SET {sets}{where}", [*assignments.values(), *params]
             )
-        except sqlite3.IntegrityError as exc:  # e.g. a UNIQUE violation update() can't pre-check
+        except integrity_error() as exc:  # e.g. a UNIQUE violation update() can't pre-check
             raise (integrity_to_validation(exc, self.model) or exc) from exc
         self._cache = None
         return cursor.rowcount
@@ -432,7 +473,7 @@ class QuerySet:
             return [field.attname for field in meta.all_fields], list(meta.all_fields)
         return list(names), [resolve_field(self.model, name, "values()") for name in names]
 
-    def _fetch_columns(self, fields: list[Field]) -> list[sqlite3.Row]:
+    def _fetch_columns(self, fields: list[Field]) -> list:
         sql, params = self._compile(", ".join(quote(field.column) for field in fields))
         return connection.fetch(sql, params)
 
@@ -514,7 +555,7 @@ class QuerySet:
         terms = []
         for item in self._effective_ordering():
             if item == "?":
-                terms.append("RANDOM()")
+                terms.append(connection.dialect().random())
                 continue
             name = item[1:] if item.startswith("-") else item
             field = resolve_field(self.model, name, "order_by()")
@@ -525,8 +566,9 @@ class QuerySet:
         where, params = self._where_sql()
         sql = f"SELECT {columns} FROM {quote(self.model._meta.table)}{where}{self._order_sql()}"
         if self._is_sliced():
-            sql += " LIMIT ? OFFSET ?"
-            params = [*params, -1 if self._limit is None else self._limit, self._offset]
+            clause, bounds = connection.dialect().limit_offset(self._limit, self._offset)
+            sql += clause
+            params = [*params, *bounds]
         return sql, params
 
     def _id_subquery(self) -> tuple[str, list]:

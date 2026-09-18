@@ -1,4 +1,9 @@
-"""SQLite connection management, transactions and raw SQL helpers."""
+"""Connection management, transactions and raw SQL helpers.
+
+SQLite is the default and needs no configuration. Pass a ``postgres://`` URL to
+``Jongo(database=…)`` (or ``JONGO_DATABASE``) to run the same models on PostgreSQL;
+that needs the optional ``psycopg`` driver (``pip install "jongo[postgres]"``).
+"""
 
 from __future__ import annotations
 
@@ -12,18 +17,22 @@ from contextlib import ContextDecorator, contextmanager
 from typing import Any, Callable, Iterator, Sequence
 
 from .. import log as _jlog
+from .dialect import Dialect, for_backend
 
 MEMORY = ":memory:"
 DEFAULT_DATABASE = "db.sqlite3"
 ENV_VAR = "JONGO_DATABASE"
+POSTGRES_SCHEMES = ("postgres", "postgresql")
 
 _config_lock = threading.RLock()
 _memory_lock = threading.RLock()
 _local = threading.local()
-_open_connections: "weakref.WeakSet[_Connection]" = weakref.WeakSet()
+_open_connections: "weakref.WeakSet" = weakref.WeakSet()
 _database: str | None = None
+_backend: str = "sqlite"
+_dialect: Dialect = Dialect()
 _generation = 0
-_memory_connection: _Connection | None = None
+_memory_connection: "_Connection | None" = None
 _savepoint_ids = itertools.count(1)
 
 
@@ -57,46 +66,168 @@ class _Connection(sqlite3.Connection):
         return cursor
 
 
-def _parse_url(url: str | os.PathLike) -> str:
-    """Turn a database URL or path into a filesystem path or ``":memory:"``."""
+class _Row(dict):
+    """A PostgreSQL row that behaves like ``sqlite3.Row``.
+
+    Jongo's SQL layer reads rows both ways — ``row["title"]`` and ``row[0]`` — and
+    iterates them for values, so the two backends hand back the same shape.
+    """
+
+    __slots__ = ("_values",)
+
+    def __init__(self, names: Sequence[str], values: Sequence[Any]):
+        super().__init__(zip(names, values))
+        self._values = tuple(values)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return dict.__getitem__(self, key)
+
+    def __iter__(self):
+        return iter(self._values)
+
+
+def _row_factory(cursor):
+    names = [column.name for column in cursor.description or ()]
+    return lambda values: _Row(names, values)
+
+
+class _PostgresConnection:
+    """Adapts a psycopg connection to the small surface Jongo uses on SQLite.
+
+    Jongo builds SQL with ``?`` placeholders; this translates each statement for
+    psycopg's ``%s`` paramstyle, keeps the write logging identical, and exposes
+    ``in_transaction`` the way ``sqlite3.Connection`` does.
+    """
+
+    def __init__(self, raw, dialect: Dialect):
+        self._raw = raw
+        self._dialect = dialect
+        self._trace = None
+
+    def set_trace_callback(self, callback) -> None:
+        """Call ``callback(sql)`` for every statement, as sqlite3 connections do."""
+        self._trace = callback
+
+    @property
+    def raw(self):
+        return self._raw
+
+    @property
+    def in_transaction(self) -> bool:
+        import psycopg
+
+        return self._raw.info.transaction_status != psycopg.pq.TransactionStatus.IDLE
+
+    def execute(self, sql, parameters=()):
+        params = list(parameters) if parameters else None
+        statement = self._dialect.translate(sql, params is not None)
+        if self._trace is not None:
+            self._trace(sql)
+        if not _jlog.sql_enabled():
+            return self._raw.execute(statement, params)
+        head = sql.lstrip()[:12].split(None, 1)[0].upper() if sql.strip() else ""
+        if head not in _WRITE:
+            return self._raw.execute(statement, params)
+        t0 = time.perf_counter()
+        cursor = self._raw.execute(statement, params)
+        ms = (time.perf_counter() - t0) * 1000
+        rows = cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else None
+        _jlog.sql(sql, ms, rows)
+        _jlog.record_sql(ms)
+        return cursor
+
+    def close(self) -> None:
+        self._raw.close()
+
+
+def _parse_url(url: str | os.PathLike) -> tuple[str, str]:
+    """Turn a database URL or path into ``(backend, target)``."""
     url = os.fspath(url).strip()
     if not url:
         raise ValueError("Database URL must not be empty.")
     if "://" in url:
         scheme, _, rest = url.partition("://")
-        if scheme.lower() != "sqlite":
-            raise ValueError(f"Unsupported database URL {url!r}: Jongo only supports sqlite:// URLs.")
+        scheme = scheme.lower()
+        if scheme in POSTGRES_SCHEMES:
+            return "postgres", url
+        if scheme != "sqlite":
+            raise ValueError(
+                f"Unsupported database URL {url!r}: Jongo supports sqlite:// and postgres:// URLs."
+            )
         if rest in ("", "/", MEMORY, "/" + MEMORY):
-            return MEMORY
+            return "sqlite", MEMORY
         url = rest[1:] if rest.startswith("/") else rest
     if url == MEMORY:
-        return MEMORY
-    return os.path.abspath(os.path.expanduser(url))
+        return "sqlite", MEMORY
+    return "sqlite", os.path.abspath(os.path.expanduser(url))
 
 
 def configure(url: str | os.PathLike) -> None:
     """Point Jongo at a database; closes any connections to the previous one."""
-    global _database
-    database = _parse_url(url)
+    global _database, _backend, _dialect
+    backend, database = _parse_url(url)
+    if backend == "postgres":
+        _require_psycopg()
     with _config_lock:
         close_connections()
-        _database = database
+        _database, _backend, _dialect = database, backend, for_backend(backend)
 
 
-def database_path() -> str:
-    """The configured database path (or ``":memory:"``), resolving the default."""
-    global _database
+def _require_psycopg():
+    try:
+        import psycopg  # noqa: F401
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError(
+            "PostgreSQL support needs the psycopg driver: pip install \"jongo[postgres]\""
+        ) from None
+    return psycopg
+
+
+def _resolve() -> str:
+    """Resolve the configured database once, filling in the backend and dialect."""
+    global _database, _backend, _dialect
     with _config_lock:
         if _database is None:
-            _database = _parse_url(os.environ.get(ENV_VAR) or DEFAULT_DATABASE)
+            backend, database = _parse_url(os.environ.get(ENV_VAR) or DEFAULT_DATABASE)
+            if backend == "postgres":
+                _require_psycopg()
+            _database, _backend, _dialect = database, backend, for_backend(backend)
         return _database
 
 
+def database_path() -> str:
+    """The configured database path, URL or ``":memory:"``, resolving the default."""
+    return _resolve()
+
+
+def backend() -> str:
+    """The active backend: ``"sqlite"`` or ``"postgres"``."""
+    _resolve()
+    return _backend
+
+
+def dialect() -> Dialect:
+    """The active dialect."""
+    _resolve()
+    return _dialect
+
+
 def is_memory() -> bool:
-    return database_path() == MEMORY
+    return backend() == "sqlite" and database_path() == MEMORY
 
 
-def _connect(database: str) -> _Connection:
+def is_postgres() -> bool:
+    return backend() == "postgres"
+
+
+def _connect(database: str):
+    if _backend == "postgres":
+        psycopg = _require_psycopg()
+        raw = psycopg.connect(database, autocommit=True, row_factory=_row_factory)
+        return _PostgresConnection(raw, _dialect)
+
     memory = database == MEMORY
     if not memory:
         os.makedirs(os.path.dirname(database) or ".", exist_ok=True)
@@ -114,11 +245,11 @@ def _connect(database: str) -> _Connection:
     return conn
 
 
-def get_connection() -> sqlite3.Connection:
+def get_connection():
     """Return this thread's connection (or the shared one for in-memory databases)."""
     global _memory_connection
     database = database_path()
-    if database == MEMORY:
+    if is_memory():
         with _config_lock:
             if _memory_connection is None:
                 _memory_connection = _connect(MEMORY)
@@ -136,10 +267,10 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
-def _safe_close(conn: sqlite3.Connection) -> None:
+def _safe_close(conn) -> None:
     try:
         conn.close()
-    except sqlite3.Error:
+    except Exception:
         pass
 
 
@@ -159,7 +290,7 @@ def close_connections() -> None:
 
 
 @contextmanager
-def locked() -> Iterator[sqlite3.Connection]:
+def locked() -> Iterator[Any]:
     """Yield the connection, holding the shared-connection lock for in-memory databases."""
     if is_memory():
         with _memory_lock:
@@ -168,16 +299,16 @@ def locked() -> Iterator[sqlite3.Connection]:
         yield get_connection()
 
 
-def execute(sql: str, params: Sequence[Any] | dict = ()) -> sqlite3.Cursor:
+def execute(sql: str, params: Sequence[Any] | dict = ()):
     """Execute one SQL statement and return the cursor.
 
-    Data-modifying statements are timed and logged by ``_Connection.execute``.
+    Data-modifying statements are timed and logged by the connection wrapper.
     """
     with locked() as conn:
         return conn.execute(sql, params)
 
 
-def fetch(sql: str, params: Sequence[Any] | dict = ()) -> list[sqlite3.Row]:
+def fetch(sql: str, params: Sequence[Any] | dict = ()) -> list:
     """Execute a query and return all rows (fetched while holding the lock)."""
     with locked() as conn:
         if not _jlog.sql_enabled():
@@ -199,12 +330,12 @@ class _Transaction(ContextDecorator):
     """Context manager / decorator: BEGIN/COMMIT outermost, SAVEPOINTs when nested."""
 
     def __init__(self) -> None:
-        self._frames: list[tuple[sqlite3.Connection, str | None, bool]] = []
+        self._frames: list[tuple[Any, str | None, bool]] = []
 
     def _recreate_cm(self) -> _Transaction:
         return _Transaction()
 
-    def __enter__(self) -> sqlite3.Connection:
+    def __enter__(self):
         memory = is_memory()
         if memory:
             _memory_lock.acquire()
@@ -215,7 +346,7 @@ class _Transaction(ContextDecorator):
                 conn.execute(f'SAVEPOINT "{savepoint}"')
             else:
                 savepoint = None
-                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(dialect().begin())
         except BaseException:
             if memory:
                 _memory_lock.release()
@@ -238,7 +369,7 @@ class _Transaction(ContextDecorator):
         return False
 
     @staticmethod
-    def _finish(conn: sqlite3.Connection, rollback: bool) -> None:
+    def _finish(conn, rollback: bool) -> None:
         if not conn.in_transaction:
             return
         if rollback:
