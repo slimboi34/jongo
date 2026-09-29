@@ -597,9 +597,11 @@ See [12_testing.py](../examples/patterns/12_testing.py) for the whole set in one
 | `jongo run [--host --port --migrate]` | production server (threaded) |
 | `jongo migrate [--plan] [--allow-destructive]` | sync the schema |
 | `jongo createadmin` | create an admin user |
-| `jongo routes` | list routes |
+| `jongo routes [--json]` | list routes |
 | `jongo shell` | a Python shell with your models loaded |
-| `jongo build` | compile components and report errors (use this in CI) |
+| `jongo build` | compile components and write the bundle |
+| `jongo check [--json]` | compile, resolve server-function hints, plan migrations; problems as data, exit 1 (use this in CI) |
+| `jongo context [--json] [-o FILE]` | describe the app for an AI coding tool — see [§20](#20-working-with-ai-coding-agents) |
 
 ---
 
@@ -666,3 +668,43 @@ compares the results.
 | State does not update after `refresh()` | `state(prop)` keeps its first value. Render server data from props. |
 | A callback does nothing | Pass `lambda v: x.set(v)`, not a bare `x.set`. |
 | Cookies behave oddly across ports on localhost | Browsers share cookies between ports on `localhost`. Use one port per app while developing. |
+
+---
+
+## 20. Working with AI coding agents
+
+Jongo was built, tested and shipped largely by AI agents, and it is designed to be extended by
+them. Three things make a framework agent-friendly, and each has a command.
+
+**The whole feature fits in context.** One language, one file: the table, the server function
+and the UI are one idea an agent can hold at once. `jongo context` prints that map for the app
+you are in — every model with its fields, every `@server` function with its signature and
+where it lives, pages and routes with their parameters and guards, components with their
+props, channels — generated from the live registries and type hints, so it is never stale,
+after a short statement of the framework's rules. Paste it into the agent, or write it down:
+
+```bash
+jongo context                 # Markdown
+jongo context --json          # the map as data
+jongo context -o AGENTS.md    # write it
+```
+
+**Mistakes fail loud, early, and as data.** A component that touches the database, an
+`import` inside a function, a server function whose annotation cannot be resolved:
+`jongo check` finds them without starting a server and reports each with the file, the line
+and a hint. With `--json` the report is something an agent can act on in a loop, and the exit
+code is 1 when there is a problem, so the same command gates CI:
+
+```bash
+jongo check --json
+# {"ok": false, "problems": [{"kind": "compile", "message": "...", "file": "app.py",
+#                              "line": 12, "hint": "..."}], "counts": {...}, "pending_migrations": [...]}
+```
+
+**The rules travel with the project.** `jongo new` writes `AGENTS.md` — the convention Codex,
+Cursor and most agents read — and a `CLAUDE.md` containing `@AGENTS.md`, Claude Code's import
+syntax. Both say the same three things: run `jongo context` before you start, run
+`jongo check --json` after every change, and keep it in one language.
+
+From Python, `jongo.describe(app)` returns the map as a dict and `jongo.context(app)` the
+Markdown; both are what the commands print.

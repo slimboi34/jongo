@@ -18,6 +18,7 @@ that renders on the server and compiles to JavaScript for the browser.
 from .app import Jongo, Page
 from .errors import CompileError, Forbidden, HTTPError, JongoError, NotFound, ServerError
 from .http import Request, Response, json_response, redirect
+from .introspect import context, describe
 from .live import broadcast
 from .rpc import server
 from .styles import css, global_css
@@ -37,12 +38,12 @@ from .vdom import (
     state,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Jongo", "Page", "Request", "Response", "redirect", "json_response",
     "component", "state", "effect", "live", "ref", "navigate", "refresh", "form_values", "js",
-    "broadcast",
+    "broadcast", "describe", "context",
     "server", "css", "global_css", "h", "raw", "fragment", "VNode",
     "HTTPError", "NotFound", "Forbidden", "ServerError", "CompileError", "JongoError",
 ]

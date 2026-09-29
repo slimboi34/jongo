@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0 (2026-09-29)
+
+Built for the author who is a model.
+
+### The app describes itself
+
+- **`jongo context`** prints a context pack for the coding agent working on the app: a short
+  statement of the framework's rules (what a component may do, how a server call works, what
+  compiles to the browser and what differs there), then the app's own map — every model with its
+  fields, every `@server` function with its signature and where it lives, pages and routes with
+  their parameters and guards, components with their props, channels, the admin mount and the
+  database — read from the live registries and type hints, so it cannot go stale. `--json` gives
+  the map as data; `-o AGENTS.md` writes it.
+- **`jongo check`** is the feedback loop an agent can act on: it compiles every component,
+  resolves every server function's type hints and plans the migrations without starting a
+  server, then reports each problem as data — `kind`, `message`, `file`, `line`, `hint` — and
+  exits 1. `jongo build` still writes the bundle.
+- **`jongo routes --json`.**
+- **`jongo new` writes `AGENTS.md`** (the convention Codex, Cursor and most agents read) and a
+  `CLAUDE.md` that imports it with Claude Code's `@AGENTS.md` syntax: the commands, the rules
+  that matter most, and the instruction to run `jongo context` before starting and
+  `jongo check --json` after every change.
+- Python API: `jongo.describe(app)` and `jongo.context(app)`.
+- The CLI's `--version` now reads `jongo.__version__` instead of carrying its own copy.
+
 ## 0.3.0 (2026-09-29)
 
 Four additions, and the bugs found while making them.

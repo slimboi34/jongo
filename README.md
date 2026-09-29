@@ -331,6 +331,26 @@ def test_add(app):
     assert client.navigate("/")["title"] == "Todos"
 ```
 
+## AI coding agents
+
+The author of a web app is increasingly a model, and a model needs what a new colleague
+needs: the map of the app in one document it can load at once, and a feedback loop whose
+output it can act on. Jongo generates both from the running code, so neither can go stale:
+
+```bash
+jongo context               # the rules of the framework, then this app's map: models, server
+                            # functions with their signatures, pages, components, channels
+jongo context -o AGENTS.md  # write it for the agent            jongo context --json   # as data
+jongo check --json          # compile every component, resolve every server function's type
+                            # hints, plan migrations; problems as {kind, message, file, line, hint}
+```
+
+`jongo new` writes an `AGENTS.md` for the project (the convention Codex, Cursor and most
+agents read) and a `CLAUDE.md` that imports it, so Claude Code knows the rules the moment it
+opens the folder. The reasons this shape suits agents are the reasons it suits people: one
+language, one file, type-checked boundaries, and compile errors at start-up instead of
+surprises in a browser. From Python: `jongo.describe(app)` and `jongo.context(app)`.
+
 ## CLI
 
 | Command | |

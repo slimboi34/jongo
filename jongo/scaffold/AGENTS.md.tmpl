@@ -1,0 +1,31 @@
+# {{name}} — notes for coding agents
+
+This is a [Jongo](https://github.com/slimboi34/jongo) app: full-stack Python, one language for
+the whole thing. The table, the server functions, the reactive UI and the pages all live in
+`app.py`. There is no JavaScript project, no API schema and no build step.
+
+## Commands
+
+| | |
+|---|---|
+| `jongo dev` | run it at http://localhost:8000 with auto-reload and an error overlay |
+| `jongo check --json` | compile every component, resolve every server function's type hints, plan migrations; problems come back as data and the exit code is 1 if there are any. **Run this after every change.** |
+| `jongo context` | the live map of this app (models, server functions with signatures, pages, components, channels) plus the rules of the framework. **Run this before you start.** |
+| `jongo routes --json` | the URL map |
+| `pytest` | the tests (`from jongo.testing import TestClient` goes through the real HTTP stack) |
+
+## The rules that matter most
+
+- A `@component` runs on the server *and* in the browser (compiled to JavaScript), so it may only
+  do what both can do: no database, no file system, no `import` inside a function. Load data in the
+  page or a `@server` function and pass it as props. Anything else is a compile error `jongo check`
+  will show you, with the file, the line and a hint.
+- The browser calls the server with a plain `await add_thing(args)`; only `@server` functions are
+  reachable and their arguments are validated against the type hints before the code runs. A parameter
+  annotated with a model class receives the row for the id that was sent.
+- Models are `db.Model` subclasses; the schema follows them automatically. No migration files.
+- Keep it in one language. Do not add JavaScript, a frontend framework, or a dependency for something
+  the framework already does (auth, sessions, CSRF, admin, real time, styles are built in).
+
+Everything else, including the browser's few known differences from CPython, is in the output of
+`jongo context`.

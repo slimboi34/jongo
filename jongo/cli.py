@@ -111,6 +111,14 @@ def cmd_migrate(args):
 
 def cmd_routes(args):
     app = load_app(args.app)
+    if getattr(args, "json", False):
+        import json
+
+        from .introspect import describe
+
+        d = describe(app)
+        print(json.dumps({"pages": d["pages"], "routes": d["routes"]}, indent=2))
+        return
     rows = [
         (",".join(sorted(r.methods - {"HEAD"})), r.path, r.kind, r.name)
         for r in app.router.routes
@@ -175,6 +183,51 @@ def cmd_build(args):
     print(_c("✓", "32;1"), f"compiled {len(COMPONENTS)} components → .jongo/build/app.js ({len(js) / 1024:.1f} KB, build {build_hash})")
 
 
+def cmd_check(args):
+    """Compile, resolve, plan; report problems as data. The command an agent runs after every change."""
+    import json
+
+    from .introspect import check
+
+    app = load_app(args.app)
+    report = check(app)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        c = report["counts"]
+        print(f"  {c['components']} components, {c['server_functions']} server functions, {c['pages']} pages, "
+              f"{c['routes']} routes, {c['models']} models, {c['channels']} channels")
+        for op in report["pending_migrations"]:
+            flag = _c(" (destructive)", "31") if op["destructive"] else ""
+            print(f"  • pending migration: {op['describe']}{flag}")
+        for p in report["problems"]:
+            where = f" ({p['file']}:{p['line']})" if p.get("file") else ""
+            print(_c(f"✗ {p['kind']}", "31;1") + f"{where}: {p['message']}")
+            if p.get("source"):
+                print(_c(f"      {p['source'].strip()}", "2"))
+            if p.get("hint"):
+                print(_c(f"      hint: {p['hint']}", "2"))
+        if report["ok"]:
+            print(_c("✓", "32;1"), "Everything compiles, every server function resolves, "
+                  + ("the schema is up to date." if not report["pending_migrations"] else "migrations are pending."))
+    raise SystemExit(0 if report["ok"] else 1)
+
+
+def cmd_context(args):
+    """The context pack: the framework's rules plus this app's map, generated from the running code."""
+    import json
+
+    from .introspect import context, describe
+
+    app = load_app(args.app)
+    text = json.dumps(describe(app), indent=2) if args.json else context(app)
+    if args.output:
+        Path(args.output).write_text(text.rstrip("\n") + "\n")
+        print(_c("✓", "32;1"), f"wrote {args.output}")
+    else:
+        print(text, end="" if text.endswith("\n") else "\n")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="jongo", description="Full-stack Python web framework")
     from . import __version__
@@ -207,6 +260,7 @@ def main(argv=None):
     p.add_argument("--allow-destructive", action="store_true", help="also drop columns")
 
     p = add("routes", cmd_routes, "list routes")
+    p.add_argument("--json", action="store_true", help="pages and routes as JSON, with parameters and guards")
     p.add_argument("--all", action="store_true", help="include Jongo's internal routes")
 
     add("shell", cmd_shell, "interactive Python shell with your models loaded")
@@ -217,6 +271,11 @@ def main(argv=None):
     p.add_argument("--password")
 
     add("build", cmd_build, "compile components and report errors")
+    p = add("check", cmd_check, "compile, resolve type hints and plan migrations; report problems as data")
+    p.add_argument("--json", action="store_true", help="the report as JSON (for a coding agent or CI)")
+    p = add("context", cmd_context, "describe this app for an AI coding tool: the rules, then the app's map")
+    p.add_argument("--json", action="store_true", help="the map as JSON instead of Markdown")
+    p.add_argument("-o", "--output", metavar="FILE", help="write to FILE (e.g. AGENTS.md) instead of stdout")
 
     args = parser.parse_args(argv)
     if not getattr(args, "fn", None):
