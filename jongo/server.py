@@ -31,11 +31,16 @@ class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
 
 class _ServerHandler(ServerHandler):
     def log_exception(self, exc_info):
-        if not isinstance(exc_info[1], (BrokenPipeError, ConnectionResetError)):
+        if not isinstance(exc_info[1], (BrokenPipeError, ConnectionResetError, TimeoutError)):
             super().log_exception(exc_info)
 
 
 class _RequestHandler(WSGIRequestHandler):
+    # Seconds a socket read/write may stall. Without it a client that opens a connection
+    # and never finishes its request (slowloris) holds a thread forever. Live streams are
+    # unaffected: they send a keepalive every 15 seconds.
+    timeout = 30
+
     def handle(self):
         try:
             self.raw_requestline = self.rfile.readline(65537)
@@ -49,7 +54,7 @@ class _RequestHandler(WSGIRequestHandler):
             )
             handler.request_handler = self
             handler.run(self.server.get_app())
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
             pass
 
     def log_message(self, format, *args):

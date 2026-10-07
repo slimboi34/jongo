@@ -211,4 +211,4 @@ def build_bundle(roots=(), components=None) -> tuple[str, str]:
     bundler = Bundler(roots)
     bundler.add_components(components)
     js = bundler.render(BOOT_FOOTER)
-    return js, hashlib.sha1(js.encode()).hexdigest()[:12]
+    return js, hashlib.sha1(js.encode(), usedforsecurity=False).hexdigest()[:12]

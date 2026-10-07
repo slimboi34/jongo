@@ -422,7 +422,7 @@ def _attr_verdict(name: str) -> int:
         elif _EVENT_ATTR.match(name) or name.lower() in _BLOCKED_ATTRS:
             verdict = 0                      # inline on* handlers and srcdoc
         else:
-            verdict = 2 if name in _URL_ATTRS else 1
+            verdict = 2 if name.lower() in _URL_ATTRS else 1   # HTML attribute names are case-insensitive
         if len(_ATTR_VERDICT) < _CACHE_MAX:  # prop names can come from data: stay bounded
             _ATTR_VERDICT[name] = verdict
     return verdict

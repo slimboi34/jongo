@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.4.1 (2026-10-07)
+
+A security patch release: the findings of a proactive audit, and hardened release workflows.
+No breaking changes; upgrading is recommended.
+
+### Fixes
+
+- **Open redirect after admin login.** The `next` check refused `//evil.com` but not
+  `/\evil.com` or `/<tab>/evil.com`, which browsers treat as links to another site. A crafted
+  login link could send an admin elsewhere right after they signed in. The check now normalises
+  the URL the way browsers do; it is available as `jongo.http.is_local_url()` for your own
+  login forms.
+- **`javascript:` URLs through upper-case attribute names.** The URL-scheme filter matched
+  attribute names case-sensitively, so a user-controlled URL under a name like `HREF` (written
+  that way, or arriving as a `**props` key from data) skipped it. HTML attribute names are case-insensitive; the server renderer and the
+  browser runtime now compare them that way.
+- **Page text could derail the boot data block.** Text containing `<!--<script>` put the HTML
+  parser in a state where the page's `<script id="jongo-data">` swallowed the rest of the
+  document, so the page never hydrated (one comment could break a page for everyone who viewed
+  it). Every `<` in that block is now written as `\u003c`.
+- **An empty `.jongo/secret` file meant an empty signing key**, and session cookies anyone could
+  forge. An empty file is now replaced with a fresh key. The file is also created owner-only
+  from the start instead of being chmod-ed after it was written.
+
+### Hardening
+
+- Every response gets `X-Content-Type-Options: nosniff` (unless you set it), and admin pages
+  send `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'` so they
+  can't be framed for clickjacking.
+- `jongo run`'s built-in server drops a connection whose socket stalls for 30 seconds, so
+  clients that open connections and never finish a request can't tie up threads indefinitely.
+  Live streams are unaffected (they send a keepalive every 15 seconds).
+- Cache-busting SHA-1 hashes are marked `usedforsecurity=False`.
+
+### Project
+
+- GitHub workflows: read-only token by default, `id-token: write` only on the publish job,
+  every action pinned to a commit SHA, checkout without persisted credentials, job timeouts and
+  concurrency groups. The build job (no OIDC token) is separate from the minimal publish job.
+  A new `Tests` workflow runs the suite on pushes and pull requests. `zizmor` reports no
+  findings.
+- Dependabot keeps the pinned actions current (weekly, grouped, 7-day cooldown).
+- `SECURITY.md`: report vulnerabilities through GitHub private vulnerability reporting.
+
 ## 0.4.0 (2026-09-29)
 
 Built for the author who is a model.

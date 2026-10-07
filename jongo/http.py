@@ -359,6 +359,19 @@ def json_response(data, status: int = 200, headers=None) -> Response:
     return Response(text, status, headers, content_type="application/json")
 
 
+def is_local_url(url) -> bool:
+    """True if ``url`` is a path on this site, safe to redirect to after login.
+
+    Browsers drop tab/CR/LF from URLs and treat ``\\`` like ``/``, so ``/\\evil.com`` and
+    ``/<TAB>/evil.com`` are protocol-relative URLs to another host even though they start
+    with a single ``/``. Those (and anything with a scheme) are rejected.
+    """
+    if not isinstance(url, str):
+        return False
+    cleaned = url.replace("\t", "").replace("\r", "").replace("\n", "").replace("\\", "/")
+    return cleaned.startswith("/") and not cleaned.startswith("//")
+
+
 def redirect(url: str, status: int = 303) -> Response:
     return Response(b"", status, {"Location": url}, content_type=None)
 

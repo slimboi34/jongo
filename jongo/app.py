@@ -304,11 +304,11 @@ class Jongo:
             '{"tree":' + tree_json
             + f',"build":{json.dumps(build_hash)},"boot":{json.dumps(self.boot_id)}'
             + f',"dev":{json.dumps(self.dev)},"csrf":{json.dumps(request.csrf_token)}}}'
-        ).replace("</", "<\\/")
+        ).replace("<", "\\u003c")  # no </script> or <!-- can end or derail this <script> block
         head = "".join(
             render_to_string(item) if isinstance(item, VNode) else str(item) for item in [*self.head, *page.head]
         )
-        css_hash = hashlib.sha1(collect_css().encode()).hexdigest()[:10]
+        css_hash = hashlib.sha1(collect_css().encode(), usedforsecurity=False).hexdigest()[:10]
         return (
             f'<!doctype html>\n<html lang="{_html.escape(self.lang)}">\n<head>\n<meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
@@ -353,11 +353,23 @@ class Jongo:
         path = self.root / ".jongo" / "secret"
         try:
             if path.exists():
-                return path.read_text().strip()
+                existing = path.read_text().strip()
+                if existing:
+                    return existing
+                # An empty file (e.g. a crash mid-write) must never become an empty HMAC
+                # key: anyone could then forge session cookies. Replace it.
+                path.unlink()
             path.parent.mkdir(parents=True, exist_ok=True)
             secret = secrets.token_urlsafe(48)
-            path.write_text(secret)
-            path.chmod(0o600)
+            # Create it owner-only from the start: write-then-chmod left a window where the
+            # key was readable by other local users (umask 022).
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:  # another process (e.g. a worker) created it just now
+                time.sleep(0.05)
+                return path.read_text().strip() or secret
+            with os.fdopen(fd, "w") as fh:
+                fh.write(secret)
             return secret
         except OSError:
             log.warning("couldn't persist a secret key; sessions will reset on restart (set JONGO_SECRET_KEY)")
@@ -378,6 +390,9 @@ class Jongo:
         return current != getattr(request, "_session_loaded", "{}")
 
     def _finish(self, request: Request, response: Response):
+        # Stop browsers from sniffing a response into a different (executable) type,
+        # e.g. an uploaded .txt served from /static rendered as HTML.
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
         if self._session_changed(request):
             if request.session:
                 value = self.signer.dumps(dict(request.session))
@@ -459,7 +474,7 @@ class Jongo:
 
         def app_css(request):
             css = collect_css()
-            return asset(css, "text/css; charset=utf-8", hashlib.sha1(css.encode()).hexdigest()[:10], request)
+            return asset(css, "text/css; charset=utf-8", hashlib.sha1(css.encode(), usedforsecurity=False).hexdigest()[:10], request)
 
         def rpc(request, function_id: str):
             fn = SERVER_FUNCTIONS.get(function_id)

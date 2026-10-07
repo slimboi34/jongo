@@ -15,7 +15,7 @@ from . import auth, db
 from .app import Page
 from .errors import NotFound
 from .html import *
-from .http import CSRF_FIELD, redirect
+from .http import CSRF_FIELD, is_local_url, redirect
 from .styles import css
 
 PER_PAGE = 50
@@ -96,6 +96,14 @@ class Admin:
         self.title = title
         self._models = models
         self._register()
+        app.after_request(self._no_framing)
+
+    def _no_framing(self, request, response):
+        """Admin pages can delete and edit data, so refuse to be framed (clickjacking)."""
+        if request.path == self.path or request.path.startswith(self.path + "/"):
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+        return response
 
     # -- helpers --------------------------------------------------------------------
 
@@ -269,7 +277,7 @@ class Admin:
             username = request.form.get("username", "")
             user = auth.authenticate(username, request.form.get("password", ""))
             destination = request.form.get("next") or admin.path
-            if not destination.startswith("/") or destination.startswith("//"):
+            if not is_local_url(destination):  # no open redirect via //host or /\host
                 destination = admin.path
             if user is None or not user.is_admin:
                 return app.render_page(request, admin.login_page(request, destination, "Wrong username or password, or not an admin."))

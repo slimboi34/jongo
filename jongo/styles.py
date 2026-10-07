@@ -59,7 +59,7 @@ class StyleSheet:
             if not _VALID_CLASS.match(name):
                 raise ValueError(f"invalid style name {name!r}: use letters, digits, - and _")
         payload = json.dumps(rules, sort_keys=True, default=str)
-        digest = hashlib.sha1(f"{module}:{payload}".encode()).hexdigest()[:6]
+        digest = hashlib.sha1(f"{module}:{payload}".encode(), usedforsecurity=False).hexdigest()[:6]
         self.rules = rules
         self.module = module
         self.classes = {name: f"{name.replace('_', '-')}-{digest}" for name in rules}
@@ -89,7 +89,7 @@ class StyleSheet:
 class GlobalStyle:
     def __init__(self, text: str, module: str):
         self.text = text
-        digest = hashlib.sha1(f"{module}:{text}".encode()).hexdigest()[:8]
+        digest = hashlib.sha1(f"{module}:{text}".encode(), usedforsecurity=False).hexdigest()[:8]
         _REGISTRY[f"global:{module}:{digest}"] = self
 
     def css(self) -> str:

@@ -548,7 +548,7 @@ function $setProp(node, k, v, old, svg) {
   if (k === "class") v = $classNames(v) || null;
   if (!$VALID_ATTR.test(k)) return; // drop names that would inject markup/handlers
   if ($EVENT_ATTR.test(k) || $BLOCKED_ATTRS.has(k.toLowerCase())) return; // no on* handlers / srcdoc from data
-  if ($URL_ATTRS.has(k) && v !== true && v !== null && v !== undefined && v !== false && $dangerousUrl(v)) {
+  if ($URL_ATTRS.has(k.toLowerCase()) && v !== true && v !== null && v !== undefined && v !== false && $dangerousUrl(v)) {
     node.removeAttribute(k); // neutralize javascript:/vbscript:
     return;
   }
