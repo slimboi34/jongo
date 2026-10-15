@@ -14,9 +14,13 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import re
 import textwrap
 
 from ..errors import CompileError
+
+#: ``onclick=``/``onClick=`` on an element: an HTML attribute name, not Jongo's ``on_click=``.
+_MISNAMED_EVENT = re.compile(r"on[A-Za-z]+")
 from .scope import analyse_function, is_plain_target, target_names
 
 JS_RESERVED = frozenset(
@@ -550,10 +554,26 @@ class FunctionTranspiler:
         ]
         return args, "{" + ", ".join(items) + "}"
 
+    def _is_element_factory(self, func) -> bool:
+        """``div``/``button``… or ``h``: a call that builds an HTML element, not a component."""
+        if not isinstance(func, ast.Name) or any(func.id in scope.locals for scope in self.scopes):
+            return False
+        from ..vdom import Tag, h
+
+        value = self.closure.get(func.id, self.fn.__globals__.get(func.id))
+        return isinstance(value, Tag) or value is h
+
     def x_Call(self, node):
         func = node.func
         if isinstance(func, ast.Name) and func.id == "super":
             self.error(node, "super() isn't supported in browser code")
+        if node.keywords and self._is_element_factory(func):
+            for k in node.keywords:
+                if k.arg and _MISNAMED_EVENT.fullmatch(k.arg) and not isinstance(k.value, ast.Constant):
+                    event = k.arg[2:].lower()
+                    self.error(k.value if hasattr(k.value, "lineno") else node,
+                               f"{k.arg}= isn't an event handler, so this function would never be called",
+                               f"write on_{event}= instead of {k.arg}=", "J114")
         args, kw = self.call_args(node)
         if isinstance(func, ast.Attribute):
             obj = self.expr(func.value)

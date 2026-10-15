@@ -57,6 +57,10 @@ def _import_app(target: str | None):
         file, line = app_location(exc, os.getcwd())
         if code == "J000":
             code, hint = "J509", hint_for("J509")
+            if isinstance(exc, ModuleNotFoundError) and exc.name:
+                hint = (f"No module named {exc.name!r} in this Python ({sys.executable}): install it into this "
+                        f"environment (`pip install {exc.name.split('.')[0]}`, if that's its package name), or "
+                        "fix the import if it's a module of your own.")
         error = AppLoadError(f"{module_name} failed to import: {type(exc).__name__}: {exc}", code=code, hint=hint,
                              file=file, line=line)
         error.cause = exc
@@ -133,7 +137,15 @@ def cmd_run(args):
 def cmd_migrate(args):
     load_app(args.app)
     from . import db
+    from .server import database_failure
 
+    try:
+        _migrate(args, db)
+    except Exception as exc:
+        raise database_failure(exc, "plan the migrations" if args.plan else "migrate the database") from None
+
+
+def _migrate(args, db):
     plan = db.plan_migrations()
     if not plan:
         print(_c("✓", "32;1"), "Database is up to date.")
@@ -188,9 +200,12 @@ def cmd_shell(args):
 def cmd_createadmin(args):
     load_app(args.app)
     from . import auth, db
-    from .server import auto_migrate
+    from .server import auto_migrate, database_failure
 
-    auto_migrate()
+    try:
+        auto_migrate()
+    except Exception as exc:
+        raise database_failure(exc, "migrate the database") from None
     username = args.username or input("Username: ").strip()
     if not username:
         die("a username is required")
@@ -340,7 +355,10 @@ def cmd_status(args):
     import urllib.error
     import urllib.request
 
-    url = args.url.rstrip("/") + "/_jongo/status"
+    base = args.url.strip().rstrip("/")
+    if "://" not in base:  # `--url localhost:8771` or `--url :8771` means http://
+        base = "http://" + (base if not base.startswith(":") else "127.0.0.1" + base)
+    url = base + "/_jongo/status"
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     token = args.token or os.environ.get("JONGO_STATUS_TOKEN")
     if token:

@@ -253,6 +253,14 @@ CATALOGUE: dict[str, dict] = {
         "code changed, or a component defined conditionally.",
         "Reload the page; define components at module level so they register at import.",
     ),
+    "J114": _e(
+        "Event handler passed under the wrong name",
+        "Event handlers are passed as on_<event>= (on_click, on_input, on_submit). A function passed as "
+        "onclick= or onClick= is an HTML attribute name, which Jongo drops (inline handlers are never "
+        "emitted), so the handler would silently never run.",
+        "Rename the keyword to on_<event>: onClick= becomes on_click=, onInput= becomes on_input=.",
+        "button('Save', onClick=save)   # J114: use on_click=save",
+    ),
     # -- J2xx routing and HTTP --------------------------------------------------------------
     "J200": _e(
         "HTTP error raised by the app",
@@ -313,6 +321,21 @@ CATALOGUE: dict[str, dict] = {
         "Forbidden",
         "The app (or a guard) raised Forbidden for this request.",
         "Check the permission condition that raised it; this is usually the app working as intended.",
+    ),
+    "J211": _e(
+        "Query parameter has the wrong type",
+        "A page or route parameter that isn't in the path is read from the query string and checked "
+        "against its annotation (page: int); the value in the URL didn't match.",
+        "Fix the link or form that builds the URL, or give the parameter a type that accepts the value "
+        "(str, Optional[int]) and handle it in the function.",
+        "@app.page('/list')\ndef listing(page: int = 1): ...\n# GET /list?page=abc  -> J211",
+    ),
+    "J212": _e(
+        "Malformed request body",
+        "The request body couldn't be read: it isn't valid JSON, the Content-Length header is invalid, "
+        "or it is larger than the app's limit (max_body_size).",
+        "Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for "
+        "larger uploads raise jongo.Request.max_body_size (16 MB by default).",
     ),
     # -- J3xx database ------------------------------------------------------------------------
     "J300": _e(
@@ -508,6 +531,8 @@ CATALOGUE: dict[str, dict] = {
 def explain(code: str) -> dict | None:
     """The catalogue entry for ``code`` (case-insensitive), with the code and its category."""
     code = (code or "").strip().upper()
+    if code.isdigit():  # `jongo explain 302` means J302
+        code = "J" + code.zfill(3)
     entry = CATALOGUE.get(code)
     if entry is None:
         return None

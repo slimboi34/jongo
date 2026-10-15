@@ -8,7 +8,9 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
+import types
 from pathlib import Path
 from socketserver import ThreadingMixIn
 from wsgiref.simple_server import ServerHandler, WSGIRequestHandler, WSGIServer
@@ -16,6 +18,8 @@ from wsgiref.simple_server import ServerHandler, WSGIRequestHandler, WSGIServer
 from .errors import CompileError
 
 log = logging.getLogger("jongo")
+#: Exit status for "the port is taken": saving a file can't fix that, so the reloader stops too.
+EXIT_PORT_IN_USE = 3
 SKIP_DIRS = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".jongo", ".pytest_cache", "site-packages"}
 
 
@@ -78,10 +82,52 @@ def auto_migrate(allow_destructive=False) -> None:
             log.warning("skipped destructive change: %s (run `jongo migrate --allow-destructive`)", op.describe())
 
 
+def database_failure(exc: BaseException, doing: str) -> SystemExit:
+    """Print a database error the way the CLI prints every error — code, message, hint — not a traceback."""
+    from .errors import classify, hint_for
+    from .monitor import redact
+
+    code, hint = classify(exc)
+    if code == "J000":
+        code, hint = "J303", hint_for("J303")
+    message = redact(str(exc)).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+    sys.stderr.write(color("error: ", "31;1") + f"[{code}] couldn't {doing}: {message}\n")
+    if hint:
+        sys.stderr.write(color(f"  hint: {hint}\n", "2"))
+    sys.stderr.write(color(f"  more: jongo explain {code} · jongo doctor checks the database\n", "2"))
+    return SystemExit(1)
+
+
+def warn_pending_migrations() -> None:
+    """``jongo run`` without ``--migrate``: say so at start if the schema is behind the models."""
+    from . import db
+
+    if not db.models_registry:
+        return
+    try:
+        plan = db.plan_migrations()
+    except Exception as exc:
+        from .errors import classify
+        from .monitor import redact
+
+        first_line = (redact(str(exc)).strip().splitlines() or [type(exc).__name__])[0]
+        log.warning("couldn't check the schema [%s]: %s", classify(exc)[0], first_line)
+        return
+    if plan:
+        listed = "; ".join(op.describe() for op in plan[:3]) + (f"; +{len(plan) - 3} more" if len(plan) > 3 else "")
+        log.warning("%d pending migration(s) [J302]: %s. Run `jongo migrate`, or start with `jongo run --migrate`; "
+                    "until then requests that touch them fail.", len(plan), listed)
+
+
 def serve(app, host="127.0.0.1", port=8000, *, migrate=None):
     setup_logging(app.dev)
     if migrate or (migrate is None and app.dev):
-        auto_migrate()
+        try:
+            auto_migrate()
+        except Exception as exc:
+            raise database_failure(exc, "migrate the database") from None
+    else:  # in the background: a slow or unreachable database must not delay binding the port
+        threading.Thread(target=warn_pending_migrations, name="jongo-schema-check", daemon=True).start()
     try:
         app.check()
     except CompileError as exc:
@@ -93,8 +139,8 @@ def serve(app, host="127.0.0.1", port=8000, *, migrate=None):
         server = ThreadingWSGIServer((host, port), _RequestHandler)
     except OSError as exc:
         if exc.errno in (48, 98):  # EADDRINUSE on macOS / Linux
-            sys.stderr.write(color(f"\n  Port {port} is already in use. Try `--port {port + 1}`.\n", "31"))
-            raise SystemExit(1) from None
+            sys.stderr.write(color(f"\n  [J505] Port {port} is already in use. Try `--port {port + 1}`.\n", "31"))
+            raise SystemExit(EXIT_PORT_IN_USE) from None
         raise
     server.set_app(app)
     from . import log as _log
@@ -153,6 +199,8 @@ def run_with_reloader(argv: list[str], root: Path) -> int:
                     names = ", ".join(os.path.relpath(p, root) for p in changed[:3])
                     sys.stderr.write(color(f"\n  ↻ {names} changed, restarting…\n", "38;5;209"))
                     break
+                if child.poll() == EXIT_PORT_IN_USE:
+                    return 1
                 if child.poll() is not None and not crashed_reported:
                     crashed_reported = True
                     sys.stderr.write(color("\n  The app stopped. Fix the error and save to restart.\n", "31"))
@@ -170,3 +218,22 @@ def run_with_reloader(argv: list[str], root: Path) -> int:
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
+
+
+class _ServerModule(types.ModuleType):
+    """This module, callable as the ``@server`` decorator.
+
+    ``jongo.server`` names two things: the ``@server`` decorator (``from jongo import server``)
+    and this module. Importing the module (``import jongo.server``, or Jongo's own CLI starting
+    a server) makes Python set the package attribute ``jongo.server`` to the module, so code
+    that runs ``from jongo import server`` afterwards gets the module. Making the module
+    callable keeps ``@server`` and ``@server(login_required=True)`` working either way.
+    """
+
+    def __call__(self, *args, **kwargs):
+        from .rpc import server
+
+        return server(*args, **kwargs)
+
+
+sys.modules[__name__].__class__ = _ServerModule

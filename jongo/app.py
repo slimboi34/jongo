@@ -34,7 +34,7 @@ from .http import (
 )
 from .monitor import Monitor
 from .routing import Route, Router
-from .rpc import SERVER_FUNCTIONS, coerce
+from .rpc import SERVER_FUNCTIONS, _label, coerce
 from .styles import collect_css
 from .vdom import VNode, render_to_string, serialize
 
@@ -50,6 +50,18 @@ class Page:
         self.title = title
         self.status = status
         self.head = list(head)
+
+
+#: Hints for errors on /_jongo/rpc/ calls, where the catalogue's generic hint (about HTML
+#: forms or registering routes) would point the wrong way.
+_RPC_HINTS = {
+    "J207": "Server calls send the CSRF token in the X-CSRF-Token header, read from the jongo_csrf cookie; "
+            "the browser runtime does this for you, so reload the page (the token may have expired). "
+            "From tests use client.rpc(fn, ...); from curl, GET a page first and send its jongo_csrf cookie "
+            "back as both the cookie and the X-CSRF-Token header.",
+    "J206": "Server functions are called with POST /_jongo/rpc/<id> and a JSON body {\"args\": [...], "
+            "\"kwargs\": {...}}; browser code does this for you with await fn(...).",
+}
 
 
 class Jongo:
@@ -284,7 +296,20 @@ class Jongo:
             elif name in params:
                 kwargs[name] = params[name]
             elif name in request.query:
-                kwargs[name] = coerce(request.query[name], hints.get(name, typing.Any), name)
+                raw = request.query[name]
+                try:
+                    kwargs[name] = coerce(raw, hints.get(name, typing.Any), name)
+                except HTTPError as exc:
+                    if exc.code != "J403":
+                        raise
+                    shown = raw if len(str(raw)) <= 40 else str(raw)[:40] + "…"
+                    hint = hints.get(name)
+                    raise HTTPError(
+                        400, f"query parameter {name!r} must be {_label(hint)}, "
+                             f"got {shown!r}", code="J211",
+                        hint=f"fix the link or form that builds ?{name}=…, or annotate {name} with a type that "
+                             "accepts it and handle the value in the function",
+                    ) from None
         if takes_kwargs:
             for name, value in params.items():
                 kwargs.setdefault(name, value)
@@ -445,6 +470,8 @@ class Jongo:
         headers = {"Allow": ", ".join(exc.allowed)} if getattr(exc, "allowed", None) else {}
         if request.path.startswith("/_jongo/rpc/") or request.path == "/_jongo/status":
             code, hint = classify(exc)
+            if request.path.startswith("/_jongo/rpc/") and code in _RPC_HINTS and not getattr(exc, "hint", None):
+                hint = _RPC_HINTS[code]  # the generic hints are about forms and routes, not server calls
             request.error_code = code
             error = {"type": type(exc).__name__, "message": exc.message, "code": code, "hint": hint,
                      "request_id": getattr(request, "request_id", None)}
@@ -494,7 +521,7 @@ class Jongo:
                     error["file"], error["line"] = file, line
                 error["traceback"] = "".join(traceback.format_exception(exc))
             else:  # production: no message, no hint, no location — just enough to find it in the log
-                error = {"type": type(exc).__name__, "message": "Server error", "code": "J407", "request_id": rid}
+                error = {"type": type(exc).__name__, "message": "Server error", "code": code, "request_id": rid}
             return json_response({"error": error}, 500)
         handler = self.error_handlers.get(500)
         if handler is not None and not self.dev:
@@ -533,9 +560,15 @@ class Jongo:
             fn = SERVER_FUNCTIONS.get(function_id)
             if fn is None:
                 raise NotFound(f"no server function {function_id!r}", code="J401")
-            payload = request.json or {}
+            try:
+                payload = request.json or {}
+            except HTTPError as exc:
+                if exc.status != 400:  # too large stays J212
+                    raise
+                raise HTTPError(400, f"malformed server function call: {exc.message}", code="J402") from None
             if not isinstance(payload, dict):
-                raise HTTPError(400, "malformed server function call", code="J402")
+                raise HTTPError(400, 'malformed server function call: the body must be a JSON object '
+                                     '{"args": [...], "kwargs": {...}}', code="J402")
             try:
                 result = fn.invoke(request, payload.get("args", []), payload.get("kwargs", {}))
             except HTTPError:

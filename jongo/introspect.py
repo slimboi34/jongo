@@ -315,7 +315,7 @@ A first parameter named `request` receives the request (`request.user`, `request
 `db.ValidationError({"field": "message"})` for errors the browser may read; any other exception is a bare \
 "Server error". `refresh=True` re-runs the page loader after a successful call.
 - **Events** hand the handler an event: `on_click=lambda e: ...`, `on_input=lambda e: draft.set(e.target.value)`, \
-`on_submit=add` (an `async def add(event)` may `await` server functions). `js.setTimeout`, `js.document` \
+`on_submit=add` (an `async def add(event)` may `await` server functions); always `on_<event>=`, never React's `onClick=` (a compile error, J114). `js.setTimeout`, `js.document` \
 and friends reach the browser from Python.
 - **Models** subclass `db.Model` with `db.Text`, `db.Int`, `db.Float`, `db.Bool`, `db.DateTime`, `db.JSON`, \
 `db.ForeignKey(Other)`; an `id` primary key is implicit. The schema is synced automatically by `jongo dev` \
@@ -458,6 +458,31 @@ def _route_line(r: dict) -> str:
 # --------------------------------------------------------------------------------- check --
 
 
+def _plan_without_writing(db) -> list:
+    """``db.plan_migrations()``, except that a SQLite file that doesn't exist yet isn't created.
+
+    Connecting to a missing SQLite file creates it (and its directory), which a read-only
+    check must not do; against no database every model is a pending "create table", which
+    is exactly what planning against an empty in-memory database reports.
+    """
+    from .db import connection
+
+    path = connection.database_path()
+    if connection.backend() != "sqlite" or path == connection.MEMORY or Path(path).exists():
+        return db.plan_migrations()
+    from .diagnostics import sqlite_location_problem
+    from .errors import JongoError
+
+    problem = sqlite_location_problem(Path(path))
+    if problem:
+        raise JongoError(f"SQLite {path}: {problem}", code="J301")
+    connection.configure(connection.MEMORY)
+    try:
+        return db.plan_migrations()
+    finally:
+        connection.configure(path)
+
+
 def check(app) -> dict:
     """Compile, resolve, plan — and report every problem as data.
 
@@ -497,16 +522,18 @@ def check(app) -> dict:
         from . import db
 
         try:
-            for op in db.plan_migrations():
+            for op in _plan_without_writing(db):
                 pending.append({"describe": op.describe(), "destructive": bool(op.destructive), "sql": list(op.sql),
                                 "code": "J302"})
         except Exception as exc:
             from .errors import classify
+            from .monitor import redact
 
             code, hint = classify(exc)
             if code == "J000":
                 code, hint = "J303", hint_for("J303")
-            problems.append({"kind": "migrations", "code": code, "message": f"could not plan migrations: {exc}",
+            problems.append({"kind": "migrations", "code": code,
+                             "message": f"could not plan migrations: {redact(str(exc), 2000)}",
                              "hint": hint})
 
     return {

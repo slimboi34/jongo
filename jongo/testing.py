@@ -52,6 +52,8 @@ class TestClient:
         if json is not None:
             body = _json.dumps(json).encode()
             content_type = "application/json"
+        elif isinstance(data, (bytes, str)):  # a raw body, e.g. malformed JSON; set Content-Type in headers
+            body = data.encode() if isinstance(data, str) else data
         elif data is not None:
             body = urllib.parse.urlencode(data, doseq=True).encode()
             content_type = "application/x-www-form-urlencoded"

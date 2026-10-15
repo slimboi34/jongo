@@ -55,7 +55,7 @@ def http_error_page(exc, request_id: str | None = None, code: str | None = None,
     if code:
         extra += (f'<p class="lead"><code>{html.escape(code)}</code> '
                   f'{html.escape(CATALOGUE.get(code, {}).get("title", ""))} — run '
-                  f'<code>jongo explain {html.escape(code)}</code> (shown in dev mode only)</p>')
+                  f'<code>jongo explain {html.escape(code)}</code> · codes and hints appear in dev mode only</p>')
     return _page(
         f"{exc.status} {exc.message}",
         f'<p class="big">{exc.status}</p><h1>{html.escape(exc.message)}</h1>{extra}'

@@ -191,9 +191,9 @@ class Request:
             if length < 0:
                 # A negative Content-Length must never reach read(): read(-1) drains the
                 # whole stream and defeats max_body_size (unauthenticated memory DoS).
-                raise HTTPError(400, "Invalid Content-Length")
+                raise HTTPError(400, "Invalid Content-Length", code="J212")
             if length > self.max_body_size:
-                raise HTTPError(413, "Request body too large")
+                raise HTTPError(413, "Request body too large", code="J212")
             stream = self.environ.get("wsgi.input")
             self._body = stream.read(length) if stream and length else b""
         return self._body
@@ -205,7 +205,7 @@ class Request:
         try:
             return json.loads(self.body)
         except ValueError:
-            raise HTTPError(400, "Request body is not valid JSON") from None
+            raise HTTPError(400, "Request body is not valid JSON", code="J212") from None
 
     @property
     def form(self) -> QueryDict:

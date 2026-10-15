@@ -15,6 +15,17 @@ class Book(db.Model):
     published = db.Bool(default=False)
 
 
+@pytest.fixture(autouse=True)
+def own_models():
+    # Models are registered globally by class name; another test module's Book must not
+    # stand in for this one when the files run in a different order.
+    saved = db.models_registry.get("Book")
+    db.models_registry["Book"] = Book
+    yield
+    if saved is not None:
+        db.models_registry["Book"] = saved
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(auth, "ITERATIONS", 1000)

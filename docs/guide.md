@@ -628,8 +628,9 @@ JONGO_SECRET_KEY=... python -m gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
 - Serve behind TLS. Cookies are marked `Secure` when the request is HTTPS.
 - Console-script shebangs are sometimes broken by build packs: `python -m gunicorn` is the
   reliable spelling.
-- Run `jongo doctor --production` before the first deploy (and in CI): it fails on a missing or
-  weak `JONGO_SECRET_KEY` and dev mode, and warns about pending migrations and cookie settings.
+- Run `jongo doctor --production` before the first deploy (and in CI): it fails on a weak
+  `JONGO_SECRET_KEY`, on no usable key at all, and on dev mode; it warns when the key only lives in
+  `.jongo/secret` (a fresh container gets a new one), and about pending migrations and cookie settings.
 - To read `/_jongo/status` from a deployed server, set `JONGO_STATUS_TOKEN` (16+ characters)
   and run `jongo status --url https://… --token …`; otherwise only a signed-in admin can.
 
@@ -832,6 +833,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J111` | Value can't be sent to the browser | Convert it to dict/list/str/int/float/bool (Model rows: .to_dict()). |
 | `J112` | Invalid UI element | Return elements (div(...), components) from pages and components; put event handlers inside a @component. |
 | `J113` | Unknown component | Reload the page; define components at module level so they register at import. |
+| `J114` | Event handler passed under the wrong name | Rename the keyword to on_<event>: onClick= becomes on_click=, onInput= becomes on_input=. |
 
 **Routing and HTTP**
 
@@ -848,6 +850,8 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J208` | Login required | Sign in first (client.login(user) in tests), or remove login_required if the endpoint is public. |
 | `J209` | Admins only | Sign in as a user with is_admin=True (`jongo createadmin` makes one). |
 | `J210` | Forbidden | Check the permission condition that raised it; this is usually the app working as intended. |
+| `J211` | Query parameter has the wrong type | Fix the link or form that builds the URL, or give the parameter a type that accepts the value (str, Optional[int]) and handle it in the function. |
+| `J212` | Malformed request body | Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for larger uploads raise jongo.Request.max_body_size (16 MB by default). |
 
 **Database, models and migrations**
 

@@ -37,6 +37,16 @@ class Post(db.Model):
         ordering = ["-id"]
 
 
+@pytest.fixture(autouse=True)
+def own_models():
+    # Models are registered globally by class name; other test modules' Author/Post must
+    # not stand in for these when the files run in a different order.
+    saved = {name: db.models_registry.get(name) for name in ("Author", "Post")}
+    db.models_registry.update(Author=Author, Post=Post)
+    yield
+    db.models_registry.update({k: v for k, v in saved.items() if v is not None})
+
+
 @server
 def publish(request, post: Post, note: str = "") -> dict:
     """Publish a post."""
@@ -148,7 +158,7 @@ def test_context_is_the_rules_then_the_map():
 def test_check_reports_pending_migrations_and_passes():
     db.configure(":memory:")  # a database with no tables yet, whatever ran before this test
     report = check(app)
-    assert report["ok"] is True and report["problems"] == []
+    assert report["ok"] is True and report["problems"] == [], report["problems"]
     assert report["counts"]["models"] >= 2 and report["counts"]["server_functions"] >= 2
     described = " ".join(op["describe"] for op in report["pending_migrations"])
     assert "post" in described.lower()
@@ -201,7 +211,7 @@ def test_cli_check_json_is_data_an_agent_can_act_on(tmp_path):
     proc = _cli("check", "--json", cwd=tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     report = json.loads(proc.stdout)
-    assert report["ok"] is True and report["problems"] == []
+    assert report["ok"] is True and report["problems"] == [], report["problems"]
     assert any("thing" in op["describe"].lower() for op in report["pending_migrations"])
 
 

@@ -136,8 +136,17 @@ class ServerFunction:
         if self.admin_required and not getattr(user, "is_admin", False):
             raise HTTPError(403, "Admins only", code="J209")
         if not isinstance(args, list) or not isinstance(kwargs, dict):
-            raise HTTPError(400, "malformed server function call", code="J402")
+            raise HTTPError(400, 'malformed server function call: "args" must be a list and "kwargs" an object',
+                            code="J402")
         call_args = [request, *args] if self.wants_request else list(args)
+        params = self.signature.parameters
+        if not any(p.kind is p.VAR_KEYWORD for p in params.values()):
+            unknown = [k for k in kwargs if k not in params or (self.wants_request and k == "request")
+                       or params[k].kind is inspect.Parameter.POSITIONAL_ONLY]
+            if unknown:  # name the typo, rather than the "missing argument" bind() would report first
+                raise HTTPError(400, f"{self.fn.__name__}(): unexpected keyword argument(s) "
+                                     f"{', '.join(map(repr, unknown))}", code="J404",
+                                hint=f"the signature is {self.fn.__name__}{self._public_signature()}")
         try:
             bound = self.signature.bind(*call_args, **kwargs)
         except TypeError as exc:

@@ -245,6 +245,22 @@ def _mentions_static(app) -> bool:
     return False
 
 
+def sqlite_location_problem(path: Path) -> str | None:
+    """Why a SQLite file that doesn't exist yet couldn't be created there, or None if it could."""
+    if path.parent.is_dir():
+        if os.access(path.parent, os.W_OK):
+            return None
+        return f"the directory {path.parent} exists but isn't writable, so the database file can't be created"
+    existing = path.parent
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    if not existing.is_dir():
+        return f"{path.parent} can't be created: {existing} is a file, not a directory"
+    if not os.access(existing, os.W_OK):
+        return f"{path.parent} doesn't exist and can't be created ({existing} isn't writable)"
+    return None
+
+
 def _database_checks(app, d: dict) -> list[dict]:
     from . import db
     from .db import connection
@@ -263,14 +279,9 @@ def _database_checks(app, d: dict) -> list[dict]:
     if backend == "sqlite" and target != ":memory:":
         path = Path(target)
         if not path.exists():
-            existing = path.parent
-            while not existing.exists() and existing != existing.parent:
-                existing = existing.parent
-            if not existing.is_dir() or not os.access(existing, os.W_OK):
-                return [check_result(
-                    "database", "fail",
-                    f"SQLite {shown}: {path.parent} doesn't exist and can't be created ({existing} isn't a "
-                    "writable directory)", code="J301")]
+            problem = sqlite_location_problem(path)
+            if problem:
+                return [check_result("database", "fail", f"SQLite {shown}: {problem}", code="J301")]
             return [check_result("database", "ok", f"SQLite {shown} doesn't exist yet; the first migrate creates it"),
                     check_result("migrations", "ok" if not db.models_registry else "warn",
                                  "no database yet" + (": `jongo migrate` will create the tables"

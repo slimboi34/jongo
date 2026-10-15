@@ -173,10 +173,16 @@ def test_unresolvable_hints_never_silently_disable_validation(client):
         return {}
 
     broken = server_decorator(unknowable)
-    with pytest.raises(JongoError) as err:
-        broken.hints
-    assert "can't resolve the type" in str(err.value)
-    assert "thing" in str(err.value)
+    try:
+        with pytest.raises(JongoError) as err:
+            broken.hints
+        assert "can't resolve the type" in str(err.value)
+        assert "thing" in str(err.value)
+    finally:  # registries are global: don't leave a broken function for later tests' check()
+        from jongo.rpc import SERVER_FUNCTIONS
+
+        SERVER_FUNCTIONS.pop(broken.id, None)
+        SERVER_FUNCTIONS.pop(resolved.id, None)
 
 
 def test_rpc_requires_csrf_token(client):

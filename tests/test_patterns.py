@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from conftest import use_test_database
-from jongo import Jongo, db
+from jongo import Jongo, db, rpc, styles, vdom
 from jongo.testing import TestClient
 
 PATTERNS = sorted((Path(__file__).parent.parent / "examples" / "patterns").glob("*.py"))
@@ -29,13 +29,17 @@ def load(path: Path):
 
 @pytest.fixture(autouse=True)
 def isolated_registry():
-    saved = dict(db.models_registry)
+    # Every registry is global by name, so a pattern's components, server functions and
+    # styles would otherwise stay registered and be compiled into later tests' apps.
+    registries = [db.models_registry, vdom.COMPONENTS, rpc.SERVER_FUNCTIONS, styles._REGISTRY]
+    saved = [dict(r) for r in registries]
     db.models_registry.clear()
     use_test_database()
     yield
     db.close_connections()
-    db.models_registry.clear()
-    db.models_registry.update(saved)
+    for registry, before in zip(registries, saved):
+        registry.clear()
+        registry.update(before)
 
 
 @pytest.mark.parametrize("path", PATTERNS, ids=lambda p: p.stem)

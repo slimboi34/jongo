@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.5.1 (2026-10-15)
+
+Fixes from a black-box run of 0.5.0 as a new user and a coding agent would use it (from PyPI,
+`jongo new`, then breaking the app on purpose). Diagnostics that were wrong, misleading or
+crashed are fixed; nothing else changes behaviour. No breaking changes.
+
+### Fixed
+
+- **`import jongo.server` no longer breaks `@server`.** Importing the server module (yourself,
+  or by the CLI before your app loaded) rebound `jongo.server` from the decorator to the module,
+  so a later `from jongo import server` / `@server` raised "'module' object is not callable".
+  The module is now callable as the decorator, so both spellings work in any import order.
+- **Database failures in the CLI are coded errors, not tracebacks.** `jongo migrate`,
+  `jongo dev`, `jongo run --migrate` and `jongo createadmin` against an unreachable PostgreSQL
+  server or an unwritable SQLite path printed a raw traceback; they now print
+  `error: [J301] couldn't migrate the database: …` with the hint, and exit 1.
+- **`jongo check` no longer creates the SQLite database** (and its directory) as a side effect;
+  it plans against no database instead. An unwritable location is reported as `J301`.
+- **`jongo doctor`** said a SQLite directory "doesn't exist and can't be created" when it existed
+  but wasn't writable; it now says which.
+- **Server calls:** a body that isn't JSON was reported as `J200` ("this is the response the app
+  chose") instead of `J402`; an unknown keyword argument was reported as a *missing* argument
+  instead of naming the typo; a failed CSRF check hinted at adding a hidden form input (it's the
+  `X-CSRF-Token` header), and `GET` on the endpoint hinted at registering a method.
+- **Production server-call errors keep their real code** (`J302`, `J305`, …) instead of a blanket
+  `J407`, so the code in the browser matches the server log and `jongo status`. The message is
+  still just "Server error", with no hint, traceback or location.
+- **A page's query parameter of the wrong type** (`/list?page=abc` for `page: int`) was `J403`
+  "Server function argument has the wrong type" with a hint about converting in the browser.
+  It is now **`J211` Query parameter has the wrong type**, and the message shows the value.
+- Request bodies that aren't valid JSON, an invalid `Content-Length` and a body over the size
+  limit are **`J212` Malformed request body** (they had no code, so they read as `J200`).
+- `jongo status --url localhost:8000` (no `http://`) said "unknown url type" and told you to
+  start the app; a URL without a scheme now means `http://`.
+- `jongo dev` on a port that's in use printed "Fix the error and save to restart" and waited
+  for a save that can't help; it now exits at once, and both `dev` and `run` tag the message `[J505]`.
+- The dev 404/400 page said "(shown in dev mode only)" in dev mode; it now says what it means.
+- The README and guide said `jongo doctor --production` fails on a *missing* secret key; it
+  warns when the key only lives in `.jongo/secret` and fails on a weak or unusable one. The docs
+  now say so.
+
+### Improved
+
+- **`J114` Event handler passed under the wrong name:** `button("Go", onClick=save)` (or
+  `onclick=`) compiled and rendered a button whose handler silently never ran. It is now a
+  compile error with "write on_click= instead of onClick=", in `jongo check` and at start-up.
+  Props of your own components (`Dialog(onclose=...)`) are unaffected. `jongo context` says so too.
+- `jongo run` without `--migrate` logs a `[J302]` warning at start when the schema is behind
+  the models, instead of failing on the first request that touches them.
+- An app that fails to import because a module is missing gets a hint naming the module, the
+  interpreter, and `pip install <module>`.
+- `jongo explain 302` works (as `J302`).
+- `TestClient.post(path, data=b"...")` sends a raw body, for testing malformed requests.
+
+### Tests
+
+- The suite no longer depends on file order: it passes forwards, reversed and shuffled. (The
+  pattern tests now restore every global registry — components, server functions, styles — and
+  the admin/agentic tests re-register their own models.) 355 → 371 tests.
+
 ## 0.5.0 (2026-10-15)
 
 Diagnostics: every error says which one it is and what to do, one command checks the whole

@@ -394,8 +394,8 @@ surprises in a browser. From Python: `jongo.describe(app)`, `jongo.context(app)`
 JONGO_SECRET_KEY=... gunicorn app:app        # or: jongo run --port 8000 --migrate
 ```
 
-Run `jongo doctor --production` first: it fails on a missing or weak secret key or dev mode
-left on. `/_jongo/status` is never open in production; set `JONGO_STATUS_TOKEN` to read it
+Run `jongo doctor --production` first: it fails on a weak secret key or dev mode left on, and
+warns when the key only lives in `.jongo/secret` (set `JONGO_SECRET_KEY` instead). `/_jongo/status` is never open in production; set `JONGO_STATUS_TOKEN` to read it
 with `jongo status --url ... --token ...`, or sign in as an admin.
 
 ## How it works
