@@ -225,7 +225,8 @@ class Component:
 
     def __init__(self, fn):
         if inspect.iscoroutinefunction(fn):
-            raise JongoError(f"@component {fn.__name__} can't be async; load data in the page or a @server function")
+            raise JongoError(f"@component {fn.__name__} can't be async; load data in the page or a @server function",
+                             code="J106", file=fn.__code__.co_filename, line=fn.__code__.co_firstlineno)
         functools.update_wrapper(self, fn)
         self.fn = fn
         self.name = fn.__name__
@@ -269,7 +270,7 @@ _rendering: contextvars.ContextVar = contextvars.ContextVar("jongo_rendering", d
 
 def _require_render(hook: str):
     if _rendering.get() is None:
-        raise JongoError(f"{hook}() can only be called while a @component is rendering")
+        raise JongoError(f"{hook}() can only be called while a @component is rendering", code="J107")
 
 
 class State:
@@ -342,7 +343,7 @@ def ref(initial=None) -> Ref:
 
 def _browser_only(name):
     def fn(*args, **kwargs):
-        raise JongoError(f"{name}() only runs in the browser: call it from an event handler or effect()")
+        raise JongoError(f"{name}() only runs in the browser: call it from an event handler or effect()", code="J108")
 
     fn.__name__ = name
     return fn
@@ -359,7 +360,7 @@ class _BrowserGlobals:
     def __getattr__(self, name):
         if name.startswith("__"):
             raise AttributeError(name)
-        raise JongoError(f"js.{name} only exists in the browser; use it in an event handler or effect()")
+        raise JongoError(f"js.{name} only exists in the browser; use it in an event handler or effect()", code="J108")
 
     def __repr__(self):
         return "<browser globals>"
@@ -383,7 +384,8 @@ def render_component(comp: Component, props, children):
     finally:
         _rendering.reset(token)
     if isinstance(result, (list, tuple)):
-        raise JongoError(f"<{comp.name}> returned a list; components must return a single element (wrap it in div())")
+        raise JongoError(f"<{comp.name}> returned a list; components must return a single element (wrap it in div())",
+                         code="J110", file=comp.fn.__code__.co_filename, line=comp.fn.__code__.co_firstlineno)
     return result
 
 
@@ -458,7 +460,7 @@ def _render(node, out, select_value) -> int:
         if component_id is not None:
             component = COMPONENTS.get(component_id)
             if component is None:
-                raise JongoError(f"unknown component {component_id!r}")
+                raise JongoError(f"unknown component {component_id!r}", code="J113")
             # Component output is live UI (it can hold event handlers and refs, which
             # serialize() rejects), so it renders through the VNode path from here down.
             return _render(render_component(component, revive(node.get("p") or {}),
@@ -476,7 +478,7 @@ def _render(node, out, select_value) -> int:
     parts = _VALIDATED_TAGS.get(tag)
     if parts is None:
         if not _VALID_TAG.match(tag):
-            raise JongoError(f"invalid tag name {tag!r}: tag names must be letters, digits and hyphens")
+            raise JongoError(f"invalid tag name {tag!r}: tag names must be letters, digits and hyphens", code="J112")
         parts = (tag.lower(), "<" + tag, "</" + tag + ">")   # once per distinct tag, not per node
         if len(_VALIDATED_TAGS) < _CACHE_MAX:
             _VALIDATED_TAGS[tag] = parts
@@ -623,7 +625,7 @@ def to_json_data(value, where: str = "value"):
         for k, v in value.items():
             key = _escape_key(str(k))
             if key in out:  # distinct keys must not silently collide as JSON strings
-                raise JongoError(f"{where}: dict keys collide as the JSON string {key!r}")
+                raise JongoError(f"{where}: dict keys collide as the JSON string {key!r}", code="J111")
             out[key] = to_json_data(v, f"{where}[{k!r}]")
         return out
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -643,11 +645,13 @@ def to_json_data(value, where: str = "value"):
     if callable(value):
         raise JongoError(
             f"{where} is a function ({getattr(value, '__name__', value)!r}). Functions can't be sent to the "
-            "browser as data; reference them inside a @component instead"
+            "browser as data; reference them inside a @component instead",
+            code="J111",
         )
     if hasattr(value, "__iter__") and not isinstance(value, (bytes, bytearray)):
         return [to_json_data(v, f"{where}[{i}]") for i, v in enumerate(value)]
-    raise JongoError(f"{where} ({type(value).__name__}) can't be sent to the browser; convert it to dict/list/str")
+    raise JongoError(f"{where} ({type(value).__name__}) can't be sent to the browser; convert it to dict/list/str",
+                     code="J111")
 
 
 def serialize(node):
@@ -656,7 +660,7 @@ def serialize(node):
     if isinstance(node, str):
         return node
     if not isinstance(node, VNode):
-        raise JongoError(f"can't render {type(node).__name__} as UI")
+        raise JongoError(f"can't render {type(node).__name__} as UI", code="J112")
     if isinstance(node.type, Component):
         data = {"C": node.type.id, "p": to_json_data(node.props, f"<{node.type.name}> props")}
     else:
@@ -668,12 +672,13 @@ def serialize(node):
                     continue
                 raise JongoError(
                     f"<{node.type} {name.replace('on:', 'on_')}=...> is outside any @component. Event handlers "
-                    "and refs run in the browser, so move this markup into a @component function"
+                    "and refs run in the browser, so move this markup into a @component function",
+                    code="J112",
                 )
             try:
                 props[key] = to_json_data(value)
             except JongoError as exc:   # the context costs an f-string per prop if built up front
-                raise JongoError(f"<{node.type}> {name}: {exc}") from None
+                raise JongoError(f"<{node.type}> {name}: {exc}", code=exc.code, hint=exc.hint) from None
         data = {"t": node.type, "p": props}
     if node.children:
         data["c"] = [serialize(c) for c in node.children]
@@ -691,7 +696,7 @@ def build(data):
     if "C" in data:
         comp = COMPONENTS.get(data["C"])
         if comp is None:
-            raise JongoError(f"unknown component {data['C']!r}")
+            raise JongoError(f"unknown component {data['C']!r}", code="J113")
         return VNode(comp, props, children, data.get("k"))
     return VNode(data["t"], props, children, data.get("k"))
 

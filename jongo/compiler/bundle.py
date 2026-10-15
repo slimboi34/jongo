@@ -67,8 +67,8 @@ class _Unit:
     code: str | None = None
 
 
-def _fail(message, hint=None):
-    raise CompileError(message, hint=hint)
+def _fail(message, hint=None, code="J102"):
+    raise CompileError(message, hint=hint, code=code)
 
 
 class Bundler:
@@ -164,7 +164,7 @@ class Bundler:
 
     def function(self, name, fn, fail=_fail) -> str:
         if fn.__name__ == "<lambda>":
-            fail(f"{name} is a lambda defined outside the component", "define it with def so it can be compiled")
+            fail(f"{name} is a lambda defined outside the component", "define it with def so it can be compiled", "J105")
         source = inspect.getsourcefile(fn)
         if not source or not self._allowed(Path(source)):
             fail(
@@ -182,7 +182,7 @@ class Bundler:
                 if '"$v"' in code:
                     code = f"$revive({code})"
         except JongoError as exc:
-            fail(f"{name} can't be used in browser code: {exc}")
+            fail(f"{name} can't be used in browser code: {exc}", getattr(exc, "hint", None), "J111")
         return self._add(obj, f"const__{name}", lambda _: code)
 
     # -- output ------------------------------------------------------------------------

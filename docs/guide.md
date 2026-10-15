@@ -28,6 +28,9 @@ This guide is the long version. The [README](../README.md) is the short one, and
 - [17. Deployment](#17-deployment)
 - [18. What compiles to the browser](#18-what-compiles-to-the-browser)
 - [19. When something goes wrong](#19-when-something-goes-wrong)
+- [20. Working with AI coding agents](#20-working-with-ai-coding-agents)
+- [21. Diagnostics: doctor, explain, status](#21-diagnostics-doctor-explain-status)
+- [22. Error codes](#22-error-codes)
 
 ---
 
@@ -602,6 +605,9 @@ See [12_testing.py](../examples/patterns/12_testing.py) for the whole set in one
 | `jongo build` | compile components and write the bundle |
 | `jongo check [--json]` | compile, resolve server-function hints, plan migrations; problems as data, exit 1 (use this in CI) |
 | `jongo context [--json] [-o FILE]` | describe the app for an AI coding tool — see [§20](#20-working-with-ai-coding-agents) |
+| `jongo doctor [--json] [--production] [--port N]` | one health report on the app, the database and the settings; exit 1 on a failure — see [§21](#21-diagnostics-doctor-explain-status) |
+| `jongo explain CODE` / `--list [--json]` | what an error code means and how to fix it — see [§22](#22-error-codes) |
+| `jongo status [--url URL] [--json]` | what a running server is doing: recent requests, errors, routes, channels, N+1 queries |
 
 ---
 
@@ -622,6 +628,10 @@ JONGO_SECRET_KEY=... python -m gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
 - Serve behind TLS. Cookies are marked `Secure` when the request is HTTPS.
 - Console-script shebangs are sometimes broken by build packs: `python -m gunicorn` is the
   reliable spelling.
+- Run `jongo doctor --production` before the first deploy (and in CI): it fails on a missing or
+  weak `JONGO_SECRET_KEY` and dev mode, and warns about pending migrations and cookie settings.
+- To read `/_jongo/status` from a deployed server, set `JONGO_STATUS_TOKEN` (16+ characters)
+  and run `jongo status --url https://… --token …`; otherwise only a signed-in admin can.
 
 [13_deployment.py](../examples/patterns/13_deployment.py) is this section as a file.
 
@@ -657,6 +667,15 @@ compares the results.
 ---
 
 ## 19. When something goes wrong
+
+Every error Jongo reports has a stable code — `J101`, `J302`, `J403` — and a hint. The code is
+on the dev error page, in server-call error responses (`err.code` in the browser), in
+`jongo check`, `jongo doctor` and every CLI error. `jongo explain J302` prints the full entry;
+[§22](#22-error-codes) lists them all. Three commands cover most situations:
+
+- the code is wrong → `jongo check` (compile, resolve, plan);
+- the app won't start, or it's not the code → `jongo doctor` (the setup, the database, the settings);
+- it fails at runtime → `jongo status` (the recent errors, with traceback and request id).
 
 | What you see | What it means |
 |---|---|
@@ -708,3 +727,172 @@ syntax. Both say the same three things: run `jongo context` before you start, ru
 
 From Python, `jongo.describe(app)` returns the map as a dict and `jongo.context(app)` the
 Markdown; both are what the commands print.
+
+---
+
+## 21. Diagnostics: doctor, explain, status
+
+**`jongo doctor`** runs every check that can be made without a browser and prints one line each:
+
+```text
+  ✓ python           Python 3.12.13
+  ✓ app              loaded 'app' from /srv/todo
+  ! secret_key       secret key read from .jongo/secret; a fresh container gets a different one [J501]
+      hint: Set JONGO_SECRET_KEY to a long random value: python -c "import secrets; print(secrets.token_urlsafe(48))"
+  ✓ components       4 components compile
+  ✓ database         sqlite /srv/todo/todos.sqlite3 is reachable
+  ! migrations       1 pending migration(s): Add column "todo"."due" [J302]
+```
+
+It checks Python and Jongo, that the app imports, that every component compiles and every
+server function's hints resolve, that the database is reachable (without creating it) and
+whether migrations are pending, the static directory, an admin user when the admin is mounted,
+optionally a port (`--port`), and — when judged as production — the secret key, dev mode,
+cookie security and the status endpoint. Production is judged when you pass `--production`,
+set `JONGO_ENV=production`, or a hosting platform's variables are present (Railway, Heroku,
+Fly, Cloud Run, Render, Vercel). `--json` gives each check as
+`{"id", "status": "ok"|"warn"|"fail", "message", "hint", "code"}`; the exit code is 1 when
+any check fails, so it gates CI. From Python: `jongo.doctor(app)`.
+
+**`jongo explain CODE`** prints what a code means, why it happens, the fix and an example;
+`jongo explain --list` lists every code, `--json` for tools. From Python: `jongo.explain("J302")`.
+
+**`jongo status`** shows what a running server has been doing, read from `/_jongo/status`:
+
+```text
+  app · jongo 0.5.0 · dev · pid 66509 · up 42s · sqlite
+  requests: 12  (2xx 10  4xx 1  5xx 1)   channels: 0 subscriber(s)
+
+  routes
+         7×  /                                avg 2.2ms  max 4.0ms
+         3×  @server app.add_todo             avg 1.1ms  max 1.4ms  1 errors
+
+  recent errors
+    [J305] IntegrityError: UNIQUE constraint failed: todo.title  (POST /_jongo/rpc/app.add_todo, request 4d42) at app.py:31
+        hint: Check for an existing row before creating (.exists()), or catch the error and report it to the user.
+
+  likely N+1 queries
+    GET /: ran 20× SELECT "id", "title" FROM "tag" WHERE ("todo_id" = ?)
+```
+
+The app keeps the last 200 requests (method, path, status, duration, request id, route, query
+count while SQL timing is on), the last 50 unhandled errors (code, message, a short traceback, the app file and line,
+the request id that ties it to the log line), a counter per route, the channels with
+subscribers, and — while SQL timing is on (dev, or `JONGO_LOG_LEVEL=DEBUG`) — requests that ran
+the same statement five or more times. It is in-process, standard library only, and costs one
+short locked append per request. From Python: `jongo.status(app)` returns the same dict.
+
+It never records query strings, headers, cookies, bodies, form values or SQL parameters, never
+shows the database URL, and strips `user:password@` from error messages.
+
+**Access.** In dev mode `/_jongo/status` is open (the dev server listens on 127.0.0.1). In
+production it answers only a signed-in admin, or a request with
+`Authorization: Bearer $JONGO_STATUS_TOKEN` when that variable is set to 16 or more characters;
+everyone else gets a 403 (`J508`). `JONGO_STATUS=off` removes the endpoint entirely.
+
+```bash
+jongo status                                     # http://127.0.0.1:8000
+jongo status --url http://127.0.0.1:8770 --json
+JONGO_STATUS_TOKEN=... jongo status --url https://myapp.example.com
+```
+
+Server-call errors carry the same data to the browser: `err.code`, `err.hint` and, in dev,
+the file, line and traceback. In production a crashing server function answers
+`{"type", "message": "Server error", "code": "J407", "request_id"}` — nothing more — and the
+request id finds the full error in `jongo status`. The dev error page shows the code, the hint
+and the request id; the production error page shows only the request id, as a reference.
+
+---
+
+## 22. Error codes
+
+Codes are stable: the wording of a message may improve, the code doesn't change, and a retired
+code is never reused. `jongo explain CODE` has the explanation and an example for each.
+
+**General**
+
+| Code | Problem | Fix |
+|---|---|---|
+| `J000` | Unhandled exception in the app's code | Read the innermost frame in your own file (it is highlighted) and fix the code there. |
+
+**Components and the compiler**
+
+| Code | Problem | Fix |
+|---|---|---|
+| `J100` | Code can't be compiled for the browser | Move the unsupported code into the page function or a @server function and pass the result in as props. |
+| `J101` | Statement not supported in browser code | Import at the top of the module (the compiler resolves imported names); use dicts instead of classes; keep changing values in state(). |
+| `J102` | Server-only object used in browser code | Load rows in the page (or a @server function) and pass them as props; call server-only code through a @server function. |
+| `J103` | Undefined name in browser code | Define or import the name at module level, or check the spelling. |
+| `J104` | Expression or syntax not supported in browser code | Rewrite it with a supported form (plain assignment, a loop, a helper function), or move it to the server. |
+| `J105` | Component source can't be read | Define the component with `def` in a module file. |
+| `J106` | Component can't be async | Load the data in the page function or a @server function; async event handlers inside the component are fine. |
+| `J107` | Hook called outside a component render | Call hooks at the top level of a @component function. |
+| `J108` | Browser-only API called on the server | Call it from an event handler or inside effect(). |
+| `J110` | Component returned a list | Wrap the elements in div(...) or fragment(...). |
+| `J111` | Value can't be sent to the browser | Convert it to dict/list/str/int/float/bool (Model rows: .to_dict()). |
+| `J112` | Invalid UI element | Return elements (div(...), components) from pages and components; put event handlers inside a @component. |
+| `J113` | Unknown component | Reload the page; define components at module level so they register at import. |
+
+**Routing and HTTP**
+
+| Code | Problem | Fix |
+|---|---|---|
+| `J200` | HTTP error raised by the app | Nothing to fix in Jongo: this is the response the app chose. Check the condition that raised it. |
+| `J201` | Unknown route converter | Use one of str, int, float, slug, path, uuid — or annotate the parameter (id: int) and write <id>. |
+| `J202` | Invalid route path | Write the path as '/things', not 'things'. |
+| `J203` | No route with that name | Check `jongo routes` for the names, or pass name= when registering the route. |
+| `J204` | Missing URL parameter | Pass every parameter in the route path as a keyword: url_for('post', id=3). |
+| `J205` | Not found | Check the URL against `jongo routes`; a typed segment (<int:id>) only matches values of that type. |
+| `J206` | Method not allowed | Register the method (methods=('GET', 'POST')) or send the request with an allowed method (see the Allow header). |
+| `J207` | CSRF check failed | Add input(type='hidden', name='csrf_token', value=request.csrf_token) to the form, or pass csrf=False for a webhook that authenticates another way. |
+| `J208` | Login required | Sign in first (client.login(user) in tests), or remove login_required if the endpoint is public. |
+| `J209` | Admins only | Sign in as a user with is_admin=True (`jongo createadmin` makes one). |
+| `J210` | Forbidden | Check the permission condition that raised it; this is usually the app working as intended. |
+
+**Database, models and migrations**
+
+| Code | Problem | Fix |
+|---|---|---|
+| `J300` | Database error | Read the driver's message; run `jongo doctor` to check the connection and schema. |
+| `J301` | Database unreachable | Check Jongo(database=...) / JONGO_DATABASE: the directory must exist and be writable, or the server must be running. |
+| `J302` | Schema out of date (pending migrations) | Run `jongo migrate` (`jongo migrate --plan` shows the changes first); `jongo dev` and `jongo run --migrate` apply them on start. |
+| `J303` | Migration failed or blocked | Read the message: make the new field null=True or give it a default, rename the table, or run `jongo migrate --plan` to see what would change. |
+| `J304` | Validation failed | Show err.errors to the user, or fix the data being saved. |
+| `J305` | Integrity constraint violated | Check for an existing row before creating (.exists()), or catch the error and report it to the user. |
+| `J306` | PostgreSQL driver missing | pip install "jongo[postgres]" |
+| `J307` | Row does not exist | Use .filter(...).first() when the row may be missing, or catch Model.DoesNotExist (raise NotFound for a 404). |
+| `J308` | More than one row matched | Filter on a unique field (id), or use .filter(...).first(). |
+| `J309` | Invalid database URL | Use a SQLite path ('app.sqlite3', 'sqlite:///path', ':memory:') or a postgres:// URL. |
+| `J310` | Unknown model or field | Check the spelling against `jongo context`; define (import) the referenced model first. |
+
+**Server functions and channels**
+
+| Code | Problem | Fix |
+|---|---|---|
+| `J401` | No such server function | Decorate the function with @server at module level, and reload the page after renaming it. |
+| `J402` | Malformed server function call | Call server functions from browser code with await fn(...), or from tests with client.rpc(fn, ...). |
+| `J403` | Server function argument has the wrong type | Send the annotated type (convert in the browser: int(draft.value)), or change the annotation. |
+| `J404` | Server function arguments don't match its signature | Call it with the parameters in its signature (`jongo context` lists every signature). |
+| `J405` | Server function type hint can't be resolved | Define the annotated type (e.g. the model) at module level where the function can see it, or drop the annotation. |
+| `J406` | Two server functions share an id | Move them to module level, or give each a distinct name. |
+| `J407` | Server function raised an exception | Read the traceback in the log or `jongo status`; raise NotFound/Forbidden/ValidationError for errors the browser may read. |
+| `J408` | Server function returned an unsupported response | Return JSON-able data, or redirect(url). |
+| `J410` | Channel subscription refused | Declare the channel with @app.channel('pattern') and check its guard. |
+| `J411` | Model argument names a row that doesn't exist | Check the id the browser sends (the row may have been deleted); handle the 404 in the browser. |
+
+**Configuration, CLI and deployment**
+
+| Code | Problem | Fix |
+|---|---|---|
+| `J501` | Secret key not set (or too weak) for production | Set JONGO_SECRET_KEY to a long random value: python -c "import secrets; print(secrets.token_urlsafe(48))" |
+| `J502` | Dev mode is on | Don't set JONGO_DEV=1 or dev=True in production; run with `jongo run`. |
+| `J503` | App file not found | Run the command inside the project, pass the file (jongo check path/to/app.py), or create one with `jongo new`. |
+| `J504` | No Jongo app in the module | Add app = Jongo(__name__) to the module, or name it: jongo check module:attr. |
+| `J505` | Port already in use | Use another port (--port 8001) or stop the other process. |
+| `J506` | Static directory missing | Create static/ next to app.py and put the files there. |
+| `J507` | Cookies won't be marked Secure behind a proxy | Behind a proxy you control, create the app with Jongo(..., trust_proxy=True). |
+| `J508` | Status endpoint refused | Set JONGO_STATUS_TOKEN on the server and run `jongo status --url ... --token $JONGO_STATUS_TOKEN`. |
+| `J509` | App failed to import | Fix the error at the file and line shown (it's in your code or something it imports). |
+| `J510` | Admin mounted but no admin user | Run `jongo createadmin`. |
+| `J511` | Unsupported Python version | Install a newer Python and recreate the virtualenv. |
+| `J512` | Can't reach the running server | Start the app (`jongo dev`) and pass its address: jongo status --url http://127.0.0.1:8000 |

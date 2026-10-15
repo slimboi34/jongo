@@ -93,7 +93,8 @@ class FunctionTranspiler:
         try:
             lines, start = inspect.getsourcelines(fn)
         except (OSError, TypeError) as exc:
-            raise CompileError(f"can't read the source code of {fn.__qualname__}: {exc}") from None
+            raise CompileError(f"can't read the source code of {fn.__qualname__}: {exc}", code="J105",
+                               hint="define the component with `def` in a .py file") from None
         self.filename = inspect.getsourcefile(fn) or "<unknown>"
         self.source_lines = lines
         self.first_line = start
@@ -104,6 +105,7 @@ class FunctionTranspiler:
                 f"{fn.__qualname__} must be defined with `def` to run in the browser",
                 filename=self.filename,
                 lineno=start,
+                code="J105",
             )
         self.node = node
         self.closure = {}
@@ -124,7 +126,7 @@ class FunctionTranspiler:
     def compile(self, js_name: str) -> str:
         return self.function(self.node, js_name)
 
-    def error(self, node, message, hint=None):
+    def error(self, node, message, hint=None, code="J104"):
         lineno = getattr(node, "lineno", None)
         source_line = None
         if lineno and lineno <= len(self.source_lines):
@@ -135,6 +137,7 @@ class FunctionTranspiler:
             lineno=self.first_line + lineno - 1 if lineno else self.first_line,
             source_line=source_line,
             hint=hint,
+            code=code,
         )
 
     def emit(self, line: str):
@@ -176,6 +179,7 @@ class FunctionTranspiler:
                 next(iter(bindings.globals.values())),
                 "`global` isn't supported in browser code",
                 hint="keep values that change in state()",
+                code="J101",
             )
         params = [a.arg for a in positional]
         star = args.vararg.arg if args.vararg else None
@@ -236,7 +240,7 @@ class FunctionTranspiler:
         handler = getattr(self, "s_" + type(node).__name__, None)
         if handler is None:
             kind = type(node).__name__
-            self.error(node, f"`{kind}` statements aren't supported in browser code", UNSUPPORTED_HINTS.get(kind))
+            self.error(node, f"`{kind}` statements aren't supported in browser code", UNSUPPORTED_HINTS.get(kind), "J101")
         handler(node)
 
     def s_Expr(self, node):
@@ -254,7 +258,7 @@ class FunctionTranspiler:
         pass
 
     def s_Global(self, node):
-        self.error(node, "`global` isn't supported in browser code", hint="keep values that change in state()")
+        self.error(node, "`global` isn't supported in browser code", hint="keep values that change in state()", code="J101")
 
     def s_Assign(self, node):
         value = self.expr(node.value)
@@ -373,7 +377,8 @@ class FunctionTranspiler:
 
     def s_FunctionDef(self, node):
         if node.decorator_list:
-            self.error(node, "decorators on nested functions aren't supported in browser code")
+            self.error(node, "decorators on nested functions aren't supported in browser code",
+                       "define the decorated function at module level", "J101")
         self.emit(f"{js_ident(node.name)} = {self.function(node, node.name)};")
 
     s_AsyncFunctionDef = s_FunctionDef
@@ -505,8 +510,8 @@ class FunctionTranspiler:
             if name in scope.locals:
                 return js_ident(name)
 
-        def fail(message, hint=None):
-            self.error(node, message, hint)
+        def fail(message, hint=None, code="J102"):
+            self.error(node, message, hint, code)
 
         if name in self.closure:
             return self.resolve(name, self.closure[name], fail)
@@ -517,8 +522,10 @@ class FunctionTranspiler:
         import builtins
 
         if hasattr(builtins, name):
-            fail(f"the builtin {name}() isn't available in browser code")
-        fail(f"name {name!r} is not defined")
+            fail(f"the builtin {name}() isn't available in browser code",
+                 "do this in a @server function, or use one of the supported builtins", "J103")
+        fail(f"name {name!r} is not defined",
+             "define or import it at module level, or check the spelling", "J103")
 
     @staticmethod
     def _dollar_attr(attr: str) -> bool:

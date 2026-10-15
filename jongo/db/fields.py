@@ -8,6 +8,8 @@ import math
 from datetime import date, datetime, time, timezone
 from typing import TYPE_CHECKING, Any
 
+from ..errors import Diagnostic, coded
+
 if TYPE_CHECKING:
     from .models import Model
 
@@ -29,8 +31,10 @@ TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 
 
-class ValidationError(Exception):
+class ValidationError(Diagnostic, Exception):
     """Invalid data. ``errors`` maps field names (or ``"__all__"``) to messages."""
+
+    code = "J304"
 
     def __init__(self, message_or_dict: str | dict[str, Any]):
         if isinstance(message_or_dict, dict):
@@ -518,10 +522,10 @@ class ForeignKey(Field):
             return get_model(self.to)
         except LookupError:
             owner = f"{self.model.__name__}.{self.name}" if self.model else "ForeignKey"
-            raise LookupError(
+            raise coded(LookupError(
                 f'{owner} points to model "{self.to}", which is not defined. '
                 f"Define (import) the {self.to} model before using this relation."
-            ) from None
+            ), "J310") from None
 
     @property
     def target_name(self) -> str:

@@ -752,6 +752,8 @@ function $rpc(id, refreshAfter = false) {
       err.type = data.error.type;
       err.status = res.status;
       err.errors = data.error.errors || null;
+      err.code = data.error.code || null;
+      err.hint = data.error.hint || null;
       if (data.error.traceback) err.traceback = data.error.traceback;
       throw err;
     }

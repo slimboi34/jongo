@@ -1,0 +1,236 @@
+{
+  "label": "0.5.0",
+  "jongo": "0.5.0",
+  "scenarios": [
+    {
+      "name": "import inside a component",
+      "expect": "J101",
+      "code": true,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [
+        "J101"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "database model used in a component",
+      "expect": "J102",
+      "code": true,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [
+        "J102"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "undefined name in a component",
+      "expect": "J103",
+      "code": true,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [
+        "J000",
+        "J103"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "hook called in a page function",
+      "expect": "J107",
+      "code": true,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [
+        "J107"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "component returns a list",
+      "expect": "J110",
+      "code": true,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [
+        "J110"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "model changed, migration not run",
+      "expect": "J302",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": true,
+      "codes_seen": [
+        "J302"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "server function called with the wrong type",
+      "expect": "J403",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": true,
+      "codes_seen": [
+        "J403"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "server function called with too many arguments",
+      "expect": "J404",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": true,
+      "codes_seen": [
+        "J404"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "call to a server function that does not exist",
+      "expect": "J401",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": true,
+      "codes_seen": [
+        "J401"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "unknown route converter",
+      "expect": "J201",
+      "code": true,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [
+        "J201"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "SQLite volume not mounted (unwritable path)",
+      "expect": "J301",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": true,
+      "codes_seen": [
+        "J301"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "PostgreSQL server not running",
+      "expect": "J301",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": true,
+      "codes_seen": [
+        "J301"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "production deploy with a weak secret key",
+      "expect": "J501",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": true,
+      "codes_seen": [
+        "J501",
+        "J507"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "server function hint names an undefined type",
+      "expect": "J405",
+      "code": true,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [
+        "J405"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "two server functions built by one factory",
+      "expect": "J406",
+      "code": true,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [
+        "J406"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "HTML form posted without the CSRF token",
+      "expect": "J207",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": false,
+      "codes_seen": [
+        "J207"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "module without a Jongo app",
+      "expect": "J504",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": true,
+      "codes_seen": [
+        "J504"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "duplicate value for a unique field",
+      "expect": "J304",
+      "code": true,
+      "hint": true,
+      "location": null,
+      "json": true,
+      "codes_seen": [
+        "J304"
+      ],
+      "expected_code_seen": true
+    },
+    {
+      "name": "url_for with a route name that does not exist",
+      "expect": "J203",
+      "code": true,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [
+        "J203"
+      ],
+      "expected_code_seen": true
+    }
+  ]
+}

@@ -16,10 +16,12 @@ Pages, server code and reactive UI in one language. Components are plain Python
 that renders on the server and compiles to JavaScript for the browser.
 """
 from .app import Jongo, Page
-from .errors import CompileError, Forbidden, HTTPError, JongoError, NotFound, ServerError
+from .diagnostics import doctor
+from .errors import CompileError, Forbidden, HTTPError, JongoError, NotFound, ServerError, explain
 from .http import Request, Response, json_response, redirect
 from .introspect import context, describe
 from .live import broadcast
+from .monitor import status
 from .rpc import server
 from .styles import css, global_css
 from .vdom import (
@@ -38,12 +40,12 @@ from .vdom import (
     state,
 )
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 __all__ = [
     "Jongo", "Page", "Request", "Response", "redirect", "json_response",
     "component", "state", "effect", "live", "ref", "navigate", "refresh", "form_values", "js",
-    "broadcast", "describe", "context",
+    "broadcast", "describe", "context", "doctor", "status", "explain",
     "server", "css", "global_css", "h", "raw", "fragment", "VNode",
     "HTTPError", "NotFound", "Forbidden", "ServerError", "CompileError", "JongoError",
 ]

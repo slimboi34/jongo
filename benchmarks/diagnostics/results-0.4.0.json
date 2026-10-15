@@ -1,0 +1,196 @@
+{
+  "label": "0.4.0",
+  "jongo": "0.4.0",
+  "scenarios": [
+    {
+      "name": "import inside a component",
+      "expect": "J101",
+      "code": false,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "database model used in a component",
+      "expect": "J102",
+      "code": false,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "undefined name in a component",
+      "expect": "J103",
+      "code": false,
+      "hint": false,
+      "location": true,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "hook called in a page function",
+      "expect": "J107",
+      "code": false,
+      "hint": false,
+      "location": true,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "component returns a list",
+      "expect": "J110",
+      "code": false,
+      "hint": false,
+      "location": false,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "model changed, migration not run",
+      "expect": "J302",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "server function called with the wrong type",
+      "expect": "J403",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "server function called with too many arguments",
+      "expect": "J404",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "call to a server function that does not exist",
+      "expect": "J401",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "unknown route converter",
+      "expect": "J201",
+      "code": false,
+      "hint": false,
+      "location": true,
+      "json": false,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "SQLite volume not mounted (unwritable path)",
+      "expect": "J301",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "PostgreSQL server not running",
+      "expect": "J301",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "production deploy with a weak secret key",
+      "expect": "J501",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": false,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "server function hint names an undefined type",
+      "expect": "J405",
+      "code": false,
+      "hint": true,
+      "location": true,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "two server functions built by one factory",
+      "expect": "J406",
+      "code": false,
+      "hint": false,
+      "location": true,
+      "json": false,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "HTML form posted without the CSRF token",
+      "expect": "J207",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": false,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "module without a Jongo app",
+      "expect": "J504",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": false,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "duplicate value for a unique field",
+      "expect": "J304",
+      "code": false,
+      "hint": false,
+      "location": null,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    },
+    {
+      "name": "url_for with a route name that does not exist",
+      "expect": "J203",
+      "code": false,
+      "hint": false,
+      "location": true,
+      "json": true,
+      "codes_seen": [],
+      "expected_code_seen": false
+    }
+  ]
+}

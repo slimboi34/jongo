@@ -12,6 +12,9 @@ the whole thing. The table, the server functions, the reactive UI and the pages 
 | `jongo check --json` | compile every component, resolve every server function's type hints, plan migrations; problems come back as data and the exit code is 1 if there are any. **Run this after every change.** |
 | `jongo context` | the live map of this app (models, server functions with signatures, pages, components, channels) plus the rules of the framework. **Run this before you start.** |
 | `jongo routes --json` | the URL map |
+| `jongo doctor --json` | one health report: Python, the app loads, database reachable, pending migrations, compile errors, production settings. Exit 1 on a failure. **Run this when something is wrong and you don't know where.** |
+| `jongo explain J302` | what an error code means and how to fix it (`--list` for all of them) |
+| `jongo status --json` | with the app running: recent requests, errors with code + traceback + request id, per-route counters, likely N+1 queries |
 | `pytest` | the tests (`from jongo.testing import TestClient` goes through the real HTTP stack) |
 
 ## The rules that matter most
@@ -26,6 +29,14 @@ the whole thing. The table, the server functions, the reactive UI and the pages 
 - Models are `db.Model` subclasses; the schema follows them automatically. No migration files.
 - Keep it in one language. Do not add JavaScript, a frontend framework, or a dependency for something
   the framework already does (auth, sessions, CSRF, admin, real time, styles are built in).
+
+## When something goes wrong
+
+Every Jongo error carries a stable code (`J101`, `J302`, `J403`…) and a hint, in `jongo check`,
+the dev error page, server-call error responses and the CLI. Read the code, run
+`jongo explain <code>`, fix, then run `jongo check --json` again. If the app won't start or the
+problem isn't in the code, run `jongo doctor --json`. If it happens at runtime, reproduce it and
+run `jongo status --json` to see the error with its request id and the failing line.
 
 Everything else, including the browser's few known differences from CPython, is in the output of
 `jongo context`.

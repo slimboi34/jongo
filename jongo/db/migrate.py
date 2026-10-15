@@ -13,12 +13,15 @@ from . import connection
 from .fields import DateTime, Field, ForeignKey, utcnow
 from .models import Model, models_registry
 from .query import quote
+from ..errors import Diagnostic
 
 ZERO_VALUES = {"text": "''", "int": "0", "float": "0.0", "bool": "0", "datetime": "''", "date": "''", "json": "'null'"}
 
 
-class MigrationError(Exception):
+class MigrationError(Diagnostic, Exception):
     """The models cannot be migrated as requested."""
+
+    code = "J303"
 
 
 @dataclass

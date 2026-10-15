@@ -193,17 +193,18 @@ def authorize(channels: typing.Iterable[str], declared: list[Channel], request) 
     allowed: list[str] = []
     for channel in channels:
         if not _CHANNEL_NAME.match(channel):
-            raise Forbidden("Invalid channel name.")
+            raise Forbidden("Invalid channel name.", code="J410")
         for pattern in declared:
             params = pattern.match(channel)
             if params is None:
                 continue
             if pattern.guard(request, **params) is False:
-                raise Forbidden(f"Not allowed to subscribe to {channel!r}.")
+                raise Forbidden(f"Not allowed to subscribe to {channel!r}.", code="J410")
             allowed.append(channel)
             break
         else:
-            raise Forbidden(f"No channel matches {channel!r}.")
+            raise Forbidden(f"No channel matches {channel!r}.", code="J410",
+                            hint="declare it with @app.channel(pattern) on the server")
     return allowed
 
 

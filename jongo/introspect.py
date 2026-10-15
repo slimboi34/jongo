@@ -20,7 +20,7 @@ import typing
 from pathlib import Path
 from typing import Any
 
-from .errors import CompileError
+from .errors import CompileError, hint_for
 
 __all__ = ["describe", "context", "check", "RULES"]
 
@@ -255,7 +255,9 @@ def describe(app) -> dict:
     database: dict | None
     try:
         path = connection.database_path()
-        if path != ":memory:":
+        if connection.backend() == "postgres":
+            path = connection._redact(path)  # never put a password into a context pack
+        elif path != ":memory:":
             try:
                 path = str(Path(path).resolve().relative_to(root))
             except (ValueError, OSError):
@@ -355,6 +357,11 @@ def context(app) -> str:
         "- `jongo dev` runs it with auto-reload and an error overlay. `jongo check --json` compiles every "
         "component, resolves every server function's type hints and plans the migrations, and reports "
         "problems as data (exit 1 if any). `jongo routes --json` lists the URL map. `pytest` runs the tests.",
+        "- **When something goes wrong:** every Jongo error carries a stable code (`J302`) and a hint. "
+        "`jongo explain J302` says what it means and how to fix it. `jongo doctor --json` checks the whole "
+        "setup (Python, database reachable, pending migrations, compile errors, production settings) and "
+        "exits 1 on a failure. With the app running, `jongo status --json` shows the recent requests, errors "
+        "(code, traceback, request id), per-route counters and likely N+1 queries.",
         f"- Database: {a['database']['backend']} ({a['database']['database']})." if a["database"] else
         "- Database: not configured (pass `database=` to `Jongo(...)`).",
         f"- Admin: mounted at `{a['admin']}`." if a["admin"] else "- Admin: not mounted (`app.admin()` would).",
@@ -473,14 +480,14 @@ def check(app) -> dict:
             except (ValueError, OSError):
                 pass
         problems.append({
-            "kind": "compile", "message": exc.message, "file": file, "line": exc.lineno,
+            "kind": "compile", "code": exc.code, "message": exc.message, "file": file, "line": exc.lineno,
             "source": exc.source_line, "hint": exc.hint,
         })
 
     d = describe(app)
     for s in d["server_functions"]:
         if s.get("error"):
-            problems.append({"kind": "server_function", "name": s["name"], "message": s["error"],
+            problems.append({"kind": "server_function", "code": "J405", "name": s["name"], "message": s["error"],
                              "file": s["file"], "line": s["line"],
                              "hint": "Every parameter of a @server function needs an annotation Jongo can "
                                      "resolve; define the model at module level or annotate with a real class."})
@@ -491,9 +498,16 @@ def check(app) -> dict:
 
         try:
             for op in db.plan_migrations():
-                pending.append({"describe": op.describe(), "destructive": bool(op.destructive), "sql": list(op.sql)})
+                pending.append({"describe": op.describe(), "destructive": bool(op.destructive), "sql": list(op.sql),
+                                "code": "J302"})
         except Exception as exc:
-            problems.append({"kind": "migrations", "message": f"could not plan migrations: {exc}"})
+            from .errors import classify
+
+            code, hint = classify(exc)
+            if code == "J000":
+                code, hint = "J303", hint_for("J303")
+            problems.append({"kind": "migrations", "code": code, "message": f"could not plan migrations: {exc}",
+                             "hint": hint})
 
     return {
         "jongo": __version__,

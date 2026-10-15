@@ -345,11 +345,28 @@ jongo check --json          # compile every component, resolve every server func
                             # hints, plan migrations; problems as {kind, message, file, line, hint}
 ```
 
+When something goes wrong, every error says which one it is: a stable code (`J302`), a hint,
+and the file and line, on the dev error page, in server-call errors, in `jongo check` and in
+every CLI message.
+
+```bash
+jongo explain J302          # what the code means, why it happens, how to fix it (--list for all)
+jongo doctor --json         # one health report: the app loads, components compile, database
+                            # reachable, pending migrations, production settings; exit 1 on failure
+jongo status --json         # a running server: recent requests and errors (code, traceback,
+                            # request id), per-route counters, channels, likely N+1 queries
+```
+
+Across 19 scripted broken apps, 0.5.0 attaches a stable code and a fix hint to every failure
+(0.4.0: no codes, hints for 3) — the method and the full table are in
+[benchmarks/diagnostics/RESULTS.md](benchmarks/diagnostics/RESULTS.md).
+
 `jongo new` writes an `AGENTS.md` for the project (the convention Codex, Cursor and most
 agents read) and a `CLAUDE.md` that imports it, so Claude Code knows the rules the moment it
 opens the folder. The reasons this shape suits agents are the reasons it suits people: one
 language, one file, type-checked boundaries, and compile errors at start-up instead of
-surprises in a browser. From Python: `jongo.describe(app)` and `jongo.context(app)`.
+surprises in a browser. From Python: `jongo.describe(app)`, `jongo.context(app)`,
+`jongo.doctor(app)`, `jongo.status(app)` and `jongo.explain(code)`.
 
 ## CLI
 
@@ -363,6 +380,11 @@ surprises in a browser. From Python: `jongo.describe(app)` and `jongo.context(ap
 | `jongo routes` | list routes |
 | `jongo shell` | Python shell with your models |
 | `jongo build` | compile components and report errors (good for CI) |
+| `jongo check [--json]` | compile, resolve server-function hints, plan migrations; problems as data |
+| `jongo context [--json] [-o FILE]` | describe the app for an AI coding tool |
+| `jongo doctor [--json] [--production]` | health report on the app, database, settings and environment |
+| `jongo explain CODE` | explain an error code and its fix (`--list` for all) |
+| `jongo status [--url URL] [--json]` | what a running server is doing: requests, errors, routes, channels |
 
 ## Deployment
 
@@ -371,6 +393,10 @@ surprises in a browser. From Python: `jongo.describe(app)` and `jongo.context(ap
 ```bash
 JONGO_SECRET_KEY=... gunicorn app:app        # or: jongo run --port 8000 --migrate
 ```
+
+Run `jongo doctor --production` first: it fails on a missing or weak secret key or dev mode
+left on. `/_jongo/status` is never open in production; set `JONGO_STATUS_TOKEN` to read it
+with `jongo status --url ... --token ...`, or sign in as an admin.
 
 ## How it works
 
@@ -397,13 +423,12 @@ cd examples/todo && ../../.venv/bin/jongo dev
 
 ## Status
 
-Version 0.2 — 0.1 hardened over two stress-audit passes (see `CHANGELOG.md`). Known limits:
-- SQLite only.
-- No WebSockets yet.
+Version 0.5 (see `CHANGELOG.md`). Known limits:
+- No WebSockets: real-time channels run over server-sent events, and the hub is per process.
 - No classes in browser code.
 - Components re-render their subtree without memoisation.
 - `x__ne=v` / `.exclude(field=v)` also match rows where the column is `NULL` (matching Python's `None != v`, not SQL's three-valued logic).
-- Browser (post-hydration) code inherits JavaScript's value model, so a few things differ from CPython (the server is always correct): integers past 2⁵³ lose precision and `str(2.0)` shows `"2"` (one number type — format explicitly, e.g. `f"{x:.2f}"`); a dict keyed by ints iterates string keys; `len("😀")` counts UTF-16 units; `(1,2) == [1,2]` is true. Do exact numeric/big-integer work in a `@server` function.
+- Browser (post-hydration) code inherits JavaScript's value model, so a few things differ from CPython (the server is always correct): integers past 2⁵³ lose precision and `str(2.0)` shows `"2"` (one number type — format explicitly, e.g. `f"{x:.2f}"`); a dict keyed by ints iterates string keys; `isinstance(5, float)` is true. Do exact numeric/big-integer work in a `@server` function.
 
 Bug reports and ideas are welcome.
 

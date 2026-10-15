@@ -6,7 +6,7 @@ import linecache
 import traceback
 from pathlib import Path
 
-from .errors import CompileError
+from .errors import CATALOGUE, CompileError, classify
 
 _STYLE = """
 :root { color-scheme: light dark; --bg:#fbfaf7; --fg:#1d1b20; --muted:#6c6772; --card:#fff; --line:#e7e2dc;
@@ -46,11 +46,20 @@ def _page(title: str, body: str) -> str:
     )
 
 
-def http_error_page(exc) -> str:
+def http_error_page(exc, request_id: str | None = None, code: str | None = None, hint: str | None = None) -> str:
+    """The page for an HTTP error. ``code``/``hint`` are only passed in dev mode."""
+    reference = f' · reference <code>{html.escape(request_id)}</code>' if request_id else ""
+    extra = ""
+    if hint:
+        extra += f'<div class="hint"><strong>Try this:</strong> {html.escape(hint)}</div>'
+    if code:
+        extra += (f'<p class="lead"><code>{html.escape(code)}</code> '
+                  f'{html.escape(CATALOGUE.get(code, {}).get("title", ""))} — run '
+                  f'<code>jongo explain {html.escape(code)}</code> (shown in dev mode only)</p>')
     return _page(
         f"{exc.status} {exc.message}",
-        f'<p class="big">{exc.status}</p><h1>{html.escape(exc.message)}</h1>'
-        '<p class="lead"><a href="/">Go to the home page</a></p>',
+        f'<p class="big">{exc.status}</p><h1>{html.escape(exc.message)}</h1>{extra}'
+        f'<p class="lead"><a href="/">Go to the home page</a>{reference}</p>',
     )
 
 
@@ -73,8 +82,12 @@ def _is_app_file(filename: str, root: Path) -> bool:
     return path.is_relative_to(root) and ".venv" not in path.parts and "site-packages" not in path.parts
 
 
-def debug_page(exc: BaseException, request, root: Path) -> str:
-    parts = [f'<span class="tag">{html.escape(type(exc).__name__)}</span>']
+def debug_page(exc: BaseException, request, root: Path, *, code: str | None = None, hint: str | None = None,
+               request_id: str | None = None) -> str:
+    if code is None:
+        code, hint = classify(exc)
+    parts = [f'<span class="tag">{html.escape(type(exc).__name__)}</span> '
+             f'<span class="tag" title="jongo explain {html.escape(code)}">{html.escape(code)}</span>']
     if isinstance(exc, CompileError):
         parts.append("<h1>This code can't run in the browser</h1>")
         parts.append(f'<p class="lead">{html.escape(exc.message)}</p>')
@@ -94,6 +107,15 @@ def debug_page(exc: BaseException, request, root: Path) -> str:
         parts.append(f"<h1>{html.escape(message.splitlines()[0])}</h1>")
         rest = "\n".join(message.splitlines()[1:] + list(getattr(exc, "__notes__", [])))
         parts.append(f'<p class="lead">{html.escape(rest) or "Unhandled exception while handling this request."}</p>')
+        if hint:
+            parts.append(f'<div class="hint"><strong>Try this:</strong> {html.escape(hint)}</div>')
+    title = CATALOGUE.get(code, {}).get("title", "")
+    parts.append(
+        f'<p class="lead"><code>{html.escape(code)}</code> {html.escape(title)} — '
+        f'run <code>jongo explain {html.escape(code)}</code> for the full entry'
+        + (f' · request <code>{html.escape(request_id)}</code> (see <code>jongo status</code>)' if request_id else "")
+        + "</p>"
+    )
 
     chain = []
     current = exc

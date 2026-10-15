@@ -99,16 +99,41 @@ def request_scope(rid: str | None = None) -> Iterator[str]:
         _stats.reset(tok_stats)
 
 
-def record_sql(ms: float) -> None:
-    """Count one data query against the current request (for its summary line)."""
+def record_sql(ms: float, statement: str | None = None) -> None:
+    """Count one data query against the current request (for its summary line).
+
+    With ``statement``, also count how often the same SQL text (parameters are
+    placeholders, so values never appear) ran in this request: the same SELECT run
+    once per row of a list is the classic N+1.
+    """
     s = _stats.get()
     if s is not None:
         s["sql"] += 1
         s["sql_ms"] += ms
+        if statement is not None:
+            shapes = s.get("shapes")
+            if shapes is None:
+                shapes = s["shapes"] = {}
+            shapes[statement] = shapes.get(statement, 0) + 1
+
+
+#: The same statement this many times in one request is reported as a likely N+1.
+N_PLUS_ONE_THRESHOLD = 5
+
+
+def n_plus_one() -> tuple[str, int] | None:
+    """The most-repeated statement of the current request, if it looks like an N+1."""
+    s = _stats.get()
+    shapes = s.get("shapes") if s else None
+    if not shapes:
+        return None
+    statement, count = max(shapes.items(), key=lambda item: item[1])
+    return (statement, count) if count >= N_PLUS_ONE_THRESHOLD else None
 
 
 def current_stats() -> dict:
-    return dict(_stats.get() or {"sql": 0, "sql_ms": 0.0})
+    s = _stats.get()
+    return {"sql": s["sql"], "sql_ms": s["sql_ms"]} if s else {"sql": 0, "sql_ms": 0.0}
 
 
 def sql_enabled() -> bool:
@@ -119,13 +144,20 @@ def sql_enabled() -> bool:
 
 # ── domain helpers (keep call sites tiny and consistent) ──────────────────────
 def request_done(method: str, path: str, status: int, ms: float, *, route: str | None = None) -> None:
-    """The one-line summary that closes out a request."""
+    """The one-line summary that closes out a request (and an N+1 warning, if it looks like one)."""
     s = current_stats()
     extra = {"method": method, "path": path, "status": status, "ms": round(ms, 1),
              "sql": s["sql"], "sql_ms": round(s["sql_ms"], 1)}
     if route:
         extra["route"] = route
     get_logger("http").info("%s %s → %s", method, path, status, extra=fields(**extra))
+    repeated = n_plus_one()
+    if repeated:
+        statement, count = repeated
+        get_logger("sql").warning(
+            "likely N+1: the same query ran %d times in %s %s", count, method, path,
+            extra=fields(count=count, statement=" ".join(statement.split())[:200],
+                         hint="load the related rows in one query (filter(id__in=...)) before the loop"))
 
 
 def sql(statement: str, ms: float, rows: int | None = None) -> None:

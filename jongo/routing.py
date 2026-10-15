@@ -7,7 +7,7 @@ import typing
 import urllib.parse
 import uuid
 
-from .errors import HTTPError, NotFound
+from .errors import HTTPError, NotFound, RouteError, URLBuildError
 
 CONVERTERS = {
     "str": (r"[^/]+", str),
@@ -21,10 +21,17 @@ _ANNOTATION_CONVERTERS = {int: "int", float: "float", uuid.UUID: "uuid"}
 _PARAM = re.compile(r"<(?:(\w+):)?(\w+)>")
 
 
+def _where(handler) -> dict:
+    """``file``/``line`` of a handler's definition, for errors about its route."""
+    code = getattr(getattr(handler, "__wrapped__", handler), "__code__", None)
+    return {"file": code.co_filename, "line": code.co_firstlineno} if code else {}
+
+
 class Route:
     def __init__(self, path: str, handler, *, methods=("GET",), kind="route", name=None, options=None):
         if not path.startswith("/"):
-            raise ValueError(f"route paths must start with '/': {path!r}")
+            raise RouteError(f"route paths must start with '/': {path!r}", code="J202",
+                             hint=f"write it as {'/' + path!r}", **_where(handler))
         self.path = path
         self.handler = handler
         self.methods = {m.upper() for m in methods}
@@ -45,7 +52,11 @@ class Route:
             if converter is None:
                 converter = _ANNOTATION_CONVERTERS.get(hints.get(param), "str")
             if converter not in CONVERTERS:
-                raise ValueError(f"unknown converter {converter!r} in {path!r}")
+                raise RouteError(
+                    f"unknown converter {converter!r} in {path!r}", code="J201",
+                    hint=f"use one of {', '.join(CONVERTERS)} (e.g. <int:{param}>), or annotate the parameter",
+                    **_where(handler),
+                )
             regex, convert = CONVERTERS[converter]
             pattern.append(re.escape(path[last : match.start()]))
             pattern.append(f"(?P<{param}>{regex})")
@@ -81,7 +92,8 @@ class Route:
         def replace(match):
             name = match.group(2)
             if name not in params:
-                raise KeyError(f"missing URL parameter {name!r} for route {self.name!r}")
+                raise URLBuildError(f"missing URL parameter {name!r} for route {self.name!r}", code="J204",
+                                    hint=f"pass {name}=... to url_for({self.name!r}, ...)")
             return urllib.parse.quote(str(params.pop(name)), safe="" if match.group(1) != "path" else "/")
 
         url = _PARAM.sub(replace, self.path)
@@ -114,7 +126,7 @@ class Router:
                 return route, params
             allowed |= route.methods
         if allowed:
-            error = HTTPError(405, f"{method} isn't allowed here")
+            error = HTTPError(405, f"{method} isn't allowed here", code="J206")
             error.allowed = sorted(allowed)
             raise error
         raise NotFound(f"No page at {path}")
@@ -123,4 +135,5 @@ class Router:
         for route in self.routes:
             if route.name == name:
                 return route.url(**params)
-        raise KeyError(f"no route named {name!r}")
+        raise URLBuildError(f"no route named {name!r}", code="J203",
+                            hint="`jongo routes` lists the route names; a route is named after its function")

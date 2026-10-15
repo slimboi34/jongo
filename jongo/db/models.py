@@ -9,6 +9,7 @@ from typing import Any
 
 from . import connection
 from .fields import DateTime, Field, ForeignKey, Int, ValidationError, utcnow
+from ..errors import Diagnostic, coded
 from .query import (DoesNotExist, MultipleObjectsReturned, Q, QuerySet, integrity_error,
                     integrity_to_validation, quote)
 
@@ -32,10 +33,12 @@ def get_model(name: str) -> type[Model]:
     for model_name, model in models_registry.items():
         if model_name.lower() == lowered or model._meta.table.lower() == lowered:
             return model
-    raise LookupError(f'No model named "{name}" is registered.')
+    raise coded(LookupError(f'No model named "{name}" is registered.'), "J310")
 
 
-class FieldDoesNotExist(KeyError):
+class FieldDoesNotExist(Diagnostic, KeyError):
+    code = "J310"
+
     def __str__(self) -> str:
         return str(self.args[0])
 

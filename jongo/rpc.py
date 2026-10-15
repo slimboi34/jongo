@@ -46,7 +46,8 @@ class ServerFunction:
         if existing is not None and existing.fn is not fn and "<locals>" in fn.__qualname__:
             raise JongoError(
                 f"two @server functions resolve to the same id {self.id!r}. They're built inside "
-                f"another function, so they collide — move them to module level or give them distinct names."
+                f"another function, so they collide — move them to module level or give them distinct names.",
+                code="J406", file=fn.__code__.co_filename, line=fn.__code__.co_firstlineno,
             )
         SERVER_FUNCTIONS[self.id] = self
 
@@ -107,24 +108,41 @@ class ServerFunction:
                 + ", ".join(unresolved)
                 + ". Arguments from the browser are checked against these hints, so the "
                 "function is not safe to call without them — define the annotated type "
-                "where the function can see it (module level), or drop the annotation."
+                "where the function can see it (module level), or drop the annotation.",
+                code="J405", file=self.fn.__code__.co_filename, line=self.fn.__code__.co_firstlineno,
             )
         return hints
+
+    def _public_signature(self) -> str:
+        """``(title: str, done: bool = False)`` — what the browser may send, for error hints."""
+        parts = []
+        for name, p in self.signature.parameters.items():
+            if self.wants_request and name == "request":
+                continue
+            prefix = "*" if p.kind is p.VAR_POSITIONAL else "**" if p.kind is p.VAR_KEYWORD else ""
+            text = prefix + name
+            if name in self.hints:
+                text += f": {_label(self.hints[name])}"
+            if p.default is not p.empty:
+                text += f" = {p.default!r}"
+            parts.append(text)
+        return f"({', '.join(parts)})"
 
     def invoke(self, request, args, kwargs):
         """Validate browser-supplied arguments and call the function."""
         user = getattr(request, "user", None)
         if self.login_required and not user:
-            raise HTTPError(401, "Please log in first")
+            raise HTTPError(401, "Please log in first", code="J208")
         if self.admin_required and not getattr(user, "is_admin", False):
-            raise HTTPError(403, "Admins only")
+            raise HTTPError(403, "Admins only", code="J209")
         if not isinstance(args, list) or not isinstance(kwargs, dict):
-            raise HTTPError(400, "malformed server function call")
+            raise HTTPError(400, "malformed server function call", code="J402")
         call_args = [request, *args] if self.wants_request else list(args)
         try:
             bound = self.signature.bind(*call_args, **kwargs)
         except TypeError as exc:
-            raise HTTPError(400, f"{self.fn.__name__}(): {exc}") from None
+            raise HTTPError(400, f"{self.fn.__name__}(): {exc}", code="J404",
+                            hint=f"the signature is {self.fn.__name__}{self._public_signature()}") from None
 
         for name, value in list(bound.arguments.items()):
             if self.wants_request and name == "request" or name not in self.hints:
@@ -183,7 +201,12 @@ def _label(hint) -> str:
 
 
 def _bad(name, hint, value):
-    raise HTTPError(400, f"argument {name!r} must be {_label(hint)}, got {type(value).__name__}")
+    raise _arg_error(f"argument {name!r} must be {_label(hint)}, got {type(value).__name__}",
+                     f"send {name} as {_label(hint)} (convert it in the browser before the call)")
+
+
+def _arg_error(message, hint=None):
+    return HTTPError(400, message, code="J403", hint=hint)
 
 
 def _is_model(hint) -> bool:
@@ -218,7 +241,8 @@ def coerce(value, hint, name="value"):
         for option in args:
             if type(value) is type(option) and value == option:
                 return value
-        raise HTTPError(400, f"argument {name!r} must be one of {', '.join(map(repr, args))}")
+        raise _arg_error(f"argument {name!r} must be one of {', '.join(map(repr, args))}",
+                         "send exactly one of the allowed values, with the same type")
     if hint is None or hint is type(None):
         if value is None:
             return None
@@ -237,11 +261,11 @@ def coerce(value, hint, name="value"):
             try:
                 result = int(value)  # can raise on absurdly long strings (Python's digit-limit)
             except ValueError:
-                raise HTTPError(400, f"argument {name!r} is too large") from None
+                raise _arg_error(f"argument {name!r} is too large") from None
         if result is None:
             _bad(name, hint, value)
         if not -(2**63) <= result < 2**63:  # bound numbers too, not just strings; SQLite stores 64-bit
-            raise HTTPError(400, f"argument {name!r} is out of range")
+            raise _arg_error(f"argument {name!r} is out of range", "integers must fit in 64 bits")
         return result
     if hint is float:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -254,7 +278,7 @@ def coerce(value, hint, name="value"):
         else:
             _bad(name, hint, value)
         if not math.isfinite(result):  # inf/nan can't round-trip to valid JSON
-            raise HTTPError(400, f"argument {name!r} must be a finite number")
+            raise _arg_error(f"argument {name!r} must be a finite number")
         return result
     if hint is str:
         if isinstance(value, str):
@@ -267,7 +291,7 @@ def coerce(value, hint, name="value"):
             _bad(name, hint, value)
         if container is tuple and args and args[-1] is not Ellipsis:
             if len(args) != len(value):
-                raise HTTPError(400, f"argument {name!r} must have {len(args)} items")
+                raise _arg_error(f"argument {name!r} must have {len(args)} items")
             return tuple(coerce(v, t, f"{name}[{i}]") for i, (v, t) in enumerate(zip(value, args)))
         inner = args[0] if args else typing.Any
         items = [coerce(v, inner, f"{name}[{i}]") for i, v in enumerate(value)]
@@ -288,7 +312,7 @@ def coerce(value, hint, name="value"):
             return hint.objects.get(id=pk)
         except Exception as exc:
             if type(exc).__name__ == "DoesNotExist" or "DoesNotExist" in {c.__name__ for c in type(exc).__mro__}:
-                raise NotFound(f"{hint.__name__} #{pk} doesn't exist") from None
+                raise NotFound(f"{hint.__name__} #{pk} doesn't exist", code="J411") from None
             raise
     if dataclasses.is_dataclass(hint) and isinstance(hint, type):
         if not isinstance(value, dict):
@@ -298,5 +322,5 @@ def coerce(value, hint, name="value"):
         try:
             return hint(**{k: coerce(v, field_hints.get(k, typing.Any), f"{name}.{k}") for k, v in value.items() if k in known})
         except TypeError as exc:
-            raise HTTPError(400, f"argument {name!r}: {exc}") from None
+            raise _arg_error(f"argument {name!r}: {exc}") from None
     return value

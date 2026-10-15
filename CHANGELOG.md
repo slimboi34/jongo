@@ -1,6 +1,88 @@
 # Changelog
 
-## 0.4.1 (2026-10-07)
+## 0.5.0 (2026-10-15)
+
+Diagnostics: every error says which one it is and what to do, one command checks the whole
+setup, and a running server can tell you what it has been doing. Also the first PyPI release of
+the 0.4.1 security fixes (below), which were tagged in the repository but never published —
+**upgrade from 0.4.0 for those alone.** No breaking changes.
+
+### An error catalogue with stable codes
+
+- Every error Jongo raises or reports carries a **stable code** (`J101` an `import` in a
+  component, `J302` a schema that needs migrating, `J403` a server-function argument of the wrong
+  type, …), a one-line **hint**, and `to_dict()`. 58 codes in six ranges: `J0xx` general, `J1xx`
+  components and the compiler, `J2xx` routing and HTTP, `J3xx` the database, `J4xx` server
+  functions and channels, `J5xx` configuration and deployment. They live in
+  `jongo.errors.CATALOGUE` (title, explanation, fix, example) and in the guide (§22).
+- **`jongo explain J302`** prints the entry; `jongo explain --list [--json]` lists them all.
+  `jongo.explain(code)` from Python.
+- The codes reach every surface: the dev error page (code, hint, request id), server-call error
+  responses (`code`, `hint`, `request_id`; `err.code`/`err.hint` on `ServerError` in the browser
+  and from `TestClient.rpc`), `jongo check` problems, and every CLI error (`error: [J503] …`,
+  `hint: …`). HTTP error pages show the code and hint in dev mode only.
+- Driver errors are recognised: "no such table/column" (SQLite) and undefined table/column
+  (PostgreSQL) are `J302` with "run `jongo migrate`"; unreachable databases `J301`; integrity
+  violations `J305`.
+- Errors point at your code: compile errors already had file and line; now route errors (an
+  unknown converter names the decorator's line), duplicate and unresolvable server functions,
+  async components, a component returning a list, and import failures in the CLI do too.
+- Exception classes and hierarchy are unchanged. Codes are attributes. Two new subclasses keep
+  the old bases: `RouteError` (a `ValueError`, for bad route paths/converters) and `URLBuildError`
+  (a `KeyError`, for `url_for`). The ORM's exceptions (`ValidationError`, `DoesNotExist`,
+  `MultipleObjectsReturned`, `MigrationError`, `FieldDoesNotExist`) gain `code`/`to_dict()` but
+  keep their bases. `str(CompileError)` now starts with its code: `[J101] …`.
+
+### `jongo doctor`
+
+- One report on whether the app, here, is healthy: Python, Jongo, the app imports, every
+  component compiles, every server function's hints resolve, the database is reachable (without
+  creating it), pending migrations, the static directory, an admin user when the admin is
+  mounted, a free port (`--port`), node (information only). Judged as production
+  (`--production`, `JONGO_ENV=production`, or a hosting platform's variables): the secret key
+  (missing, file-based or shorter than 32 characters), dev mode, Secure cookies behind a proxy,
+  and the status endpoint's token.
+- Each check is `{id, status: ok|warn|fail, message, hint, code}`; `--json` for tools; exit 1 on
+  any failure. `jongo.doctor(app)` from Python. Never prints a secret or a database password.
+
+### A live system view: `jongo status`
+
+- The app records, in process, the last 200 requests (method, path, status, duration, request
+  id, route, error code, and the SQL query count while SQL timing is on), the last 50 unhandled errors (code, message, short
+  traceback, app file and line, request id), a counter per route and per server function,
+  channel subscribers, and likely N+1 queries (the same statement five or more times in one
+  request, while SQL timing is on — the log gets a matching warning). Standard library only;
+  one locked append per request (~0.3 µs).
+- `jongo.status(app)` returns it; **`/_jongo/status`** serves it as JSON; **`jongo status
+  [--url] [--json]`** reads it from a running server.
+- Secure by default: open in dev mode only. In production it answers a signed-in admin, or
+  `Authorization: Bearer $JONGO_STATUS_TOKEN` (16+ characters, compared in constant time);
+  everyone else gets 403 (`J508`). `JONGO_STATUS=off` removes it. Query strings, headers,
+  cookies, bodies and SQL parameters are never recorded; credentials in URLs are redacted.
+- A crashing server function in production still answers only `"Server error"`, now with
+  `code: "J407"` and the `request_id` that finds the full error in `jongo status`; the production
+  500 page shows the request id as a reference.
+
+### For coding agents
+
+- `jongo context` and the `AGENTS.md` that `jongo new` writes now say to run `jongo explain`,
+  `jongo doctor --json` and `jongo status --json` when something goes wrong.
+- `jongo check --json` reports an app that fails to import as a `load` problem with a code, file
+  and line, instead of a traceback.
+
+### Measured
+
+- `benchmarks/diagnostics/`: 19 scripted broken apps, scored on whether the failure output
+  carries a stable code, a fix hint, the file and line, and JSON. 0.4.0 → 0.5.0: codes 0/19 →
+  19/19, hints 3/19 → 19/19, file:line 8/9 → 9/9, JSON 14/19 → 18/19. Method and caveats in
+  `benchmarks/diagnostics/RESULTS.md`. No measurable change in requests per second.
+
+### Fixes
+
+- `jongo context` / `describe()` no longer include a PostgreSQL password from the database URL.
+- An unsupported database URL in an error message has its password redacted.
+
+## 0.4.1 (2026-10-07, never published to PyPI — ships in 0.5.0)
 
 A security patch release: the findings of a proactive audit, and hardened release workflows.
 No breaking changes; upgrading is recommended.

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import connection
 from .fields import DateTime, Field, ForeignKey, ValidationError, utcnow
+from ..errors import Diagnostic
 
 
 def integrity_error() -> tuple[type[Exception], ...]:
@@ -68,12 +69,16 @@ MAX_GET_RESULTS = 21
 REPR_ITEMS = 20
 
 
-class DoesNotExist(Exception):
+class DoesNotExist(Diagnostic, Exception):
     """A ``get()`` query matched no rows. Each model has its own subclass."""
 
+    code = "J307"
 
-class MultipleObjectsReturned(Exception):
+
+class MultipleObjectsReturned(Diagnostic, Exception):
     """A ``get()`` query matched more than one row. Each model has its own subclass."""
+
+    code = "J308"
 
 
 def quote(identifier: str) -> str:

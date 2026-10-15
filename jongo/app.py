@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import html as _html
 import inspect
 import json
@@ -20,7 +21,7 @@ from pathlib import Path
 from . import live as live_module
 from . import vdom
 from . import log as jlog
-from .errors import CompileError, HTTPError, NotFound
+from .errors import CompileError, HTTPError, NotFound, app_location, classify, hint_for
 from .http import (
     CSRF_COOKIE,
     SESSION_COOKIE,
@@ -31,6 +32,7 @@ from .http import (
     json_response,
     redirect,
 )
+from .monitor import Monitor
 from .routing import Route, Router
 from .rpc import SERVER_FUNCTIONS, coerce
 from .styles import collect_css
@@ -93,7 +95,12 @@ class Jongo:
         self.layout_props = None
         self._bundle: tuple[str, str] | None = None
         self._bundle_lock = threading.Lock()
-        self.signer = Signer(secret_key or os.environ.get("JONGO_SECRET_KEY") or self._local_secret())
+        self.monitor = Monitor()
+        #: Where the signing key came from: "argument", "env", "file" or "ephemeral" (for `jongo doctor`).
+        self.secret_source = "argument" if secret_key else ("env" if os.environ.get("JONGO_SECRET_KEY") else None)
+        secret = secret_key or os.environ.get("JONGO_SECRET_KEY") or self._local_secret()
+        self.secret_length = len(secret)  # for `jongo doctor`; the secret itself is never kept or reported
+        self.signer = Signer(secret)
         if database is not None:
             from . import db
 
@@ -193,7 +200,8 @@ class Jongo:
 
     def handle(self, request: Request) -> Response:
         started = time.perf_counter()
-        with jlog.request_scope():
+        with jlog.request_scope() as rid:
+            request.request_id = rid
             try:
                 self._load_session(request)
                 response = None
@@ -220,10 +228,26 @@ class Jongo:
                     self._finish(request, response)
                 except Exception:
                     jlog.get_logger("http").error("failed to finalise error response", exc_info=True)
-            if self.dev and not (request.path.startswith("/_jongo/app") or request.path == "/_jongo/live"):
+            path = request.path
+            if not path.startswith("/_jongo/") or path.startswith("/_jongo/rpc/"):
+                # Recorded for the live system view: no query string, headers or bodies.
                 elapsed = (time.perf_counter() - started) * 1000
-                route_name = getattr(getattr(request, "route", None), "name", None)
-                jlog.request_done(request.method, request.full_path, response.status, elapsed, route=route_name)
+                route = getattr(request, "route", None)
+                key = None
+                if route is not None:
+                    key = route.path
+                    if route.name == "_jongo_rpc":  # one counter per server function, not one for all
+                        fid = request.path_params.get("function_id")
+                        key = f"@server {fid}" if fid in SERVER_FUNCTIONS else "@server (unknown)"
+                stats = jlog.current_stats()
+                self.monitor.record_request(
+                    request.method, path[:200], response.status, elapsed, rid,
+                    key, stats["sql"], stats["sql_ms"],
+                    jlog.n_plus_one() if stats["sql"] else None, getattr(request, "error_code", None),
+                )
+                if self.dev:
+                    jlog.request_done(request.method, request.full_path, response.status, elapsed,
+                                      route=route.name if route is not None else None)
             return response
 
     def _dispatch(self, request: Request) -> Response:
@@ -232,13 +256,13 @@ class Jongo:
         request.path_params = params
         options = route.options
         if request.method not in SAFE_METHODS and options.get("csrf", True) and not request.csrf_ok():
-            raise HTTPError(403, "The form expired (CSRF check failed). Reload the page and try again.")
+            raise HTTPError(403, "The form expired (CSRF check failed). Reload the page and try again.", code="J207")
         if options.get("login_required") and not request.user:
             if route.kind == "page":
                 return redirect(f"{self.login_url}?next={urllib.parse.quote(request.full_path, safe='')}", 302)
-            raise HTTPError(401, "Please log in first")
+            raise HTTPError(401, "Please log in first", code="J208")
         if options.get("admin_required") and not getattr(request.user, "is_admin", False):
-            raise HTTPError(403, "Admins only")
+            raise HTTPError(403, "Admins only", code="J209")
         if route.kind == "page":
             return self.render_page(request, self.call_handler(route, request, params), route)
         return self.to_response(self.call_handler(route, request, params), request)
@@ -351,6 +375,7 @@ class Jongo:
 
     def _local_secret(self) -> str:
         path = self.root / ".jongo" / "secret"
+        self.secret_source = "file"
         try:
             if path.exists():
                 existing = path.read_text().strip()
@@ -373,6 +398,7 @@ class Jongo:
             return secret
         except OSError:
             log.warning("couldn't persist a secret key; sessions will reset on restart (set JONGO_SECRET_KEY)")
+            self.secret_source = "ephemeral"
             return secrets.token_urlsafe(48)
 
     def _load_session(self, request: Request):
@@ -417,8 +443,13 @@ class Jongo:
 
     def http_error(self, request: Request, exc: HTTPError) -> Response:
         headers = {"Allow": ", ".join(exc.allowed)} if getattr(exc, "allowed", None) else {}
-        if request.path.startswith("/_jongo/rpc/"):
-            return json_response({"error": {"type": type(exc).__name__, "message": exc.message}}, exc.status, headers)
+        if request.path.startswith("/_jongo/rpc/") or request.path == "/_jongo/status":
+            code, hint = classify(exc)
+            request.error_code = code
+            error = {"type": type(exc).__name__, "message": exc.message, "code": code, "hint": hint,
+                     "request_id": getattr(request, "request_id", None)}
+            return json_response({"error": error}, exc.status, headers)
+        request.error_code = exc.code
         handler = self.error_handlers.get(exc.status)
         if handler is not None:
             try:
@@ -434,14 +465,36 @@ class Jongo:
                     return self.server_error(request, inner)
         from .errors_page import http_error_page
 
+        if self.dev:  # the code and the hint help the developer; production pages stay plain
+            code, hint = classify(exc)
+            return Response(http_error_page(exc, request_id=getattr(request, "request_id", None), code=code,
+                                            hint=hint), exc.status, headers)
         return Response(http_error_page(exc), exc.status, headers)
 
     def server_error(self, request: Request, exc: Exception) -> Response:
-        jlog.get_logger("http").error("error handling %s %s", request.method, request.full_path, exc_info=exc)
-        if request.path.startswith("/_jongo/rpc/"):
-            error = {"type": type(exc).__name__, "message": str(exc) if self.dev else "Server error"}
+        rid = getattr(request, "request_id", None)
+        is_rpc = request.path.startswith("/_jongo/rpc/")
+        code, hint = classify(exc)
+        if code == "J000" and is_rpc:
+            code, hint = "J407", hint or "the server function's own code raised; see the traceback"
+        request.error_code = code
+        try:
+            self.monitor.record_error(exc, rid=rid, method=request.method, path=request.path, root=self.root,
+                                      code=code, hint=hint)
+        except Exception:  # the recorder must never turn one error into two
+            pass
+        jlog.get_logger("http").error("error handling %s %s", request.method, request.full_path, exc_info=exc,
+                                      extra=jlog.fields(code=code))
+        if is_rpc:
             if self.dev:
+                error = {"type": type(exc).__name__, "message": str(exc), "code": code, "hint": hint,
+                         "request_id": rid}
+                file, line = app_location(exc, self.root)
+                if file:
+                    error["file"], error["line"] = file, line
                 error["traceback"] = "".join(traceback.format_exception(exc))
+            else:  # production: no message, no hint, no location — just enough to find it in the log
+                error = {"type": type(exc).__name__, "message": "Server error", "code": "J407", "request_id": rid}
             return json_response({"error": error}, 500)
         handler = self.error_handlers.get(500)
         if handler is not None and not self.dev:
@@ -452,8 +505,8 @@ class Jongo:
         from .errors_page import debug_page, http_error_page
 
         if self.dev:
-            return Response(debug_page(exc, request, self.root), 500)
-        return Response(http_error_page(HTTPError(500)), 500)
+            return Response(debug_page(exc, request, self.root, code=code, hint=hint, request_id=rid), 500)
+        return Response(http_error_page(HTTPError(500), request_id=rid), 500)
 
     # -- built-in routes -------------------------------------------------------------------------------
 
@@ -479,10 +532,10 @@ class Jongo:
         def rpc(request, function_id: str):
             fn = SERVER_FUNCTIONS.get(function_id)
             if fn is None:
-                raise NotFound(f"no server function {function_id!r}")
+                raise NotFound(f"no server function {function_id!r}", code="J401")
             payload = request.json or {}
             if not isinstance(payload, dict):
-                raise HTTPError(400, "malformed server function call")
+                raise HTTPError(400, "malformed server function call", code="J402")
             try:
                 result = fn.invoke(request, payload.get("args", []), payload.get("kwargs", {}))
             except HTTPError:
@@ -492,7 +545,9 @@ class Jongo:
                 if type(exc).__name__ == "ValidationError" and isinstance(errors, dict):
                     message = "; ".join(str(v) for v in errors.values()) or str(exc)
                     return json_response(
-                        {"error": {"type": "ValidationError", "message": message, "errors": errors}}, 400
+                        {"error": {"type": "ValidationError", "message": message, "errors": errors,
+                                   "code": "J304", "hint": exc.hint or hint_for("J304"),
+                                   "request_id": request.request_id}}, 400
                     )
                 raise
             if isinstance(result, Response):
@@ -501,7 +556,8 @@ class Jongo:
                     response = json_response({"redirect": location})
                     response.cookies.extend(result.cookies)
                     return response
-                raise HTTPError(500, "server functions can return data or redirect(), not other responses")
+                raise HTTPError(500, "server functions can return data or redirect(), not other responses",
+                                code="J408")
             return json_response({"ok": result})
 
         def live(request):
@@ -551,7 +607,35 @@ class Jongo:
         self.router.add(Route("/_jongo/app.css", app_css, name="_jongo_css", kind="internal"))
         self.router.add(Route("/_jongo/rpc/<path:function_id>", rpc, methods=("POST",), name="_jongo_rpc", kind="internal"))
         self.router.add(Route("/_jongo/live", live, name="_jongo_live", kind="internal"))
+        def status_view(request):
+            """The live system view as JSON. Open in dev; an admin or the status token in production."""
+            from .monitor import status
+
+            if os.environ.get("JONGO_STATUS", "").lower() in ("0", "off", "false", "no"):
+                raise NotFound()
+            if not app.dev and not app._status_allowed(request):
+                raise HTTPError(
+                    403, "The status endpoint needs a signed-in admin or the status token in production.",
+                    code="J508",
+                )
+            return json_response(status(app), headers={"Cache-Control": "no-store"})
+
         self.router.add(Route(f"{self.static_url}/<path:path>", static, name="static", kind="internal"))
+        self.router.add(Route("/_jongo/status", status_view, name="_jongo_status", kind="internal"))
+
+    def _status_allowed(self, request: Request) -> bool:
+        """Production access to /_jongo/status: an admin session, or ``Bearer $JONGO_STATUS_TOKEN``.
+
+        The token must be at least 16 characters, so an empty or toy value never opens it.
+        """
+        token = os.environ.get("JONGO_STATUS_TOKEN") or ""
+        supplied = request.headers.get("authorization") or ""
+        if len(token) >= 16 and hmac.compare_digest(supplied.encode(), f"Bearer {token}".encode()):
+            return True
+        try:
+            return bool(getattr(request.user, "is_admin", False))
+        except Exception:
+            return False
 
     def admin(self, path: str = "/admin", *, models=None, title: str = "Jongo admin"):
         """Mount the generated admin site. Sign in with a user that has ``is_admin=True``."""

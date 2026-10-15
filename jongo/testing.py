@@ -153,6 +153,9 @@ class TestClient:
             error.type = data["error"]["type"]
             error.status = response.status
             error.errors = data["error"].get("errors")
+            error.code = data["error"].get("code") or error.code
+            error.hint = data["error"].get("hint")
+            error.request_id = data["error"].get("request_id")
             raise error
         return data.get("redirect") and {"redirect": data["redirect"]} or data.get("ok")
 

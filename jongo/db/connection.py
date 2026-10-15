@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import sqlite3
 import time
 import threading
@@ -18,6 +19,7 @@ from typing import Any, Callable, Iterator, Sequence
 
 from .. import log as _jlog
 from .dialect import Dialect, for_backend
+from ..errors import coded
 
 MEMORY = ":memory:"
 DEFAULT_DATABASE = "db.sqlite3"
@@ -62,7 +64,7 @@ class _Connection(sqlite3.Connection):
         ms = (time.perf_counter() - t0) * 1000
         rows = cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else None
         _jlog.sql(sql, ms, rows)
-        _jlog.record_sql(ms)
+        _jlog.record_sql(ms, sql)
         return cursor
 
 
@@ -135,27 +137,32 @@ class _PostgresConnection:
         ms = (time.perf_counter() - t0) * 1000
         rows = cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else None
         _jlog.sql(sql, ms, rows)
-        _jlog.record_sql(ms)
+        _jlog.record_sql(ms, sql)
         return cursor
 
     def close(self) -> None:
         self._raw.close()
 
 
+def _redact(url: str) -> str:
+    """The URL with any password replaced, for messages and reports."""
+    return re.sub(r"(://[^:/@]*:)[^@]*@", r"\1***@", url)
+
+
 def _parse_url(url: str | os.PathLike) -> tuple[str, str]:
     """Turn a database URL or path into ``(backend, target)``."""
     url = os.fspath(url).strip()
     if not url:
-        raise ValueError("Database URL must not be empty.")
+        raise coded(ValueError("Database URL must not be empty."), "J309")
     if "://" in url:
         scheme, _, rest = url.partition("://")
         scheme = scheme.lower()
         if scheme in POSTGRES_SCHEMES:
             return "postgres", url
         if scheme != "sqlite":
-            raise ValueError(
-                f"Unsupported database URL {url!r}: Jongo supports sqlite:// and postgres:// URLs."
-            )
+            raise coded(ValueError(
+                f"Unsupported database URL {_redact(url)!r}: Jongo supports sqlite:// and postgres:// URLs."
+            ), "J309")
         if rest in ("", "/", MEMORY, "/" + MEMORY):
             return "sqlite", MEMORY
         url = rest[1:] if rest.startswith("/") else rest
@@ -179,9 +186,9 @@ def _require_psycopg():
     try:
         import psycopg  # noqa: F401
     except ModuleNotFoundError:
-        raise ModuleNotFoundError(
+        raise coded(ModuleNotFoundError(
             "PostgreSQL support needs the psycopg driver: pip install \"jongo[postgres]\""
-        ) from None
+        ), "J306") from None
     return psycopg
 
 
@@ -230,7 +237,11 @@ def _connect(database: str):
 
     memory = database == MEMORY
     if not memory:
-        os.makedirs(os.path.dirname(database) or ".", exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(database) or ".", exist_ok=True)
+        except OSError as exc:  # e.g. a volume that isn't mounted: say which database, and what to do
+            raise coded(exc, "J301", f"the directory for the SQLite database {database} can't be created; "
+                                     "point database= / JONGO_DATABASE at a writable location") from None
     conn = sqlite3.connect(
         database,
         timeout=30,
@@ -317,7 +328,7 @@ def fetch(sql: str, params: Sequence[Any] | dict = ()) -> list:
         rows = conn.execute(sql, params).fetchall()
         ms = (time.perf_counter() - t0) * 1000
         _jlog.sql(sql, ms, len(rows))
-        _jlog.record_sql(ms)
+        _jlog.record_sql(ms, sql)
         return rows
 
 

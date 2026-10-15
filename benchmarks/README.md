@@ -90,3 +90,9 @@ nothing to offer it.
 Cold start, memory, concurrency beyond 16, PostgreSQL, real network latency, TLS, static
 files, and the thing the whole framework exists for: how long it takes a person to build
 and change a feature.
+
+## Diagnostics
+
+[diagnostics/](diagnostics/) measures something other than speed: across 19 scripted broken
+apps, does the failure output carry a stable error code, a fix hint, the file and line, and
+JSON? Results for 0.4.0 and 0.5.0 are in [diagnostics/RESULTS.md](diagnostics/RESULTS.md).
