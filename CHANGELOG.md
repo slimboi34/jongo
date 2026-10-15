@@ -2,6 +2,8 @@
 
 ## 0.5.2 (2026-10-15)
 
+0.5.1 was never published to PyPI; 0.5.2 ships its fixes too (see the 0.5.1 section below).
+
 Fixes from a second review of 0.5.1: its own changes read critically, the test suite against a
 real PostgreSQL server, the browser runtime in headless Chrome, and the status endpoint under
 load and under production settings. No breaking changes.
@@ -37,7 +39,7 @@ load and under production settings. No breaking changes.
   The suite passes on SQLite and on PostgreSQL 16 (en_GB.UTF-8 and C), forwards, reversed and
   shuffled. 371 → 386 tests (`tests/test_fixes_052.py`).
 
-## 0.5.1 (2026-10-15)
+## 0.5.1 (2026-10-15, never published; ships in 0.5.2)
 
 Fixes from a black-box run of 0.5.0 as a new user and a coding agent would use it (from PyPI,
 `jongo new`, then breaking the app on purpose). Diagnostics that were wrong, misleading or
