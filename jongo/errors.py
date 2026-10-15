@@ -470,7 +470,8 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J502": _e(
         "Dev mode is on",
-        "Dev mode shows tracebacks and source code on error pages and opens /_jongo/status to anyone who can reach the server.",
+        "Dev mode shows tracebacks and source code on error pages and opens /_jongo/status to anyone who can reach the "
+        "server (unless JONGO_ENV=production is set, which keeps the status endpoint locked).",
         "Don't set JONGO_DEV=1 or dev=True in production; run with `jongo run`.",
     ),
     "J503": _e(

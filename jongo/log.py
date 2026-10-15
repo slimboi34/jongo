@@ -89,7 +89,9 @@ def get_logger(domain: str = "") -> logging.Logger:
 def request_scope(rid: str | None = None) -> Iterator[str]:
     """Tag every log line emitted inside the block with a short request id, and
     reset the per-request SQL counters. Yields the request id."""
-    rid = rid or os.urandom(2).hex()
+    # 8 hex digits: the id finds one request in the log and in `jongo status`, so it must not
+    # repeat among the requests a busy server handles (4 digits collided within ~300 requests).
+    rid = rid or os.urandom(4).hex()
     tok_id = _request_id.set(rid)
     tok_stats = _stats.set({"sql": 0, "sql_ms": 0.0})
     try:
@@ -213,7 +215,7 @@ class PrettyFormatter(logging.Formatter):
             self._c(ts, _DIM) + "  "
             + self._c(f"{levelname:<5}", _LEVEL_STYLE.get(record.levelname, "0")) + "  "
             + self._c(f"{domain[:7]:<7}", _DOMAIN) + "  "
-            + (self._c(f"{rid:<4}", _rid_style(rid)) if rid else "    ") + "  "
+            + (self._c(f"{rid:<8}", _rid_style(rid)) if rid else " " * 8) + "  "
         )
         msg = record.getMessage()
 

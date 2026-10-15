@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.5.2 (2026-10-15)
+
+Fixes from a second review of 0.5.1: its own changes read critically, the test suite against a
+real PostgreSQL server, the browser runtime in headless Chrome, and the status endpoint under
+load and under production settings. No breaking changes.
+
+### Fixed
+
+- **`J114` no longer rejects code that merely sets an `on…` attribute.** 0.5.1 made any
+  non-constant `onclick=`/`onX=` on an element a compile error, so `a("x", onclick=f"track({n})")`,
+  `button(onclick=script)` or `div(one=x)` — which 0.5.0 compiled, dropping the attribute — stopped
+  the app from starting. J114 now fires only when the value is certainly a function (a lambda, a
+  `def` in the component, a server function or another module-level callable).
+- **`JONGO_ENV=production` now wins over dev mode.** With a stray `JONGO_DEV=1` (or `dev=True`) on
+  a deployed server, `jongo doctor` reported "checked as dev", all green, and `/_jongo/status` was
+  open to anyone. Now doctor judges it as production and fails `J502`, the server logs a `[J502]`
+  warning at start, and `/_jongo/status` still needs an admin or the token. (A hosting platform's
+  variables alone still don't override dev mode, so `railway run jongo dev` stays local.)
+- **Server calls with a JSON body that isn't an object** (`[]`, `null`, `0`, `false`, `""`) ran the
+  function with no arguments; they are `J402` malformed calls. An empty body still means no arguments.
+- **Request ids are 8 hex digits instead of 4.** The id is how an error in the browser, the log and
+  `jongo status` are matched up, and 4 digits repeated within a few hundred requests.
+- **The dev error overlay shows the code and hint** of a server-call error (`[J407] ServerError: …`,
+  `hint: …`, `more: jongo explain J407`), like every other surface. Browser errors with a numeric
+  `code` of their own (DOMException) are left alone.
+- `/_jongo/status/` (trailing slash) answered a refused request with an HTML page instead of the
+  JSON error the endpoint gives; it now answers like `/_jongo/status`.
+- A `JONGO_STATUS_TOKEN` with surrounding whitespace (read from a file with its newline) never
+  matched; it is stripped.
+
+### Tests
+
+- `TestQuerySet.test_ordering` failed on a PostgreSQL database with a non-C collation (the default
+  on most installs: `walk` sorts before `Write`); it now accepts either order for those two rows.
+  The suite passes on SQLite and on PostgreSQL 16 (en_GB.UTF-8 and C), forwards, reversed and
+  shuffled. 371 → 386 tests (`tests/test_fixes_052.py`).
+
 ## 0.5.1 (2026-10-15)
 
 Fixes from a black-box run of 0.5.0 as a new user and a coding agent would use it (from PyPI,

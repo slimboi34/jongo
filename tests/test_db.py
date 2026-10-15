@@ -760,7 +760,12 @@ class TestQuerySet:
 
     def test_ordering(self, people):
         Todo = people.Todo
-        assert titles(Todo.order_by("title")) == ["100% effort_now", "Buy milk", "Write REPORT", "walk the dog"]
+        ordered = titles(Todo.order_by("title"))
+        if db.backend() == "sqlite":
+            assert ordered == ["100% effort_now", "Buy milk", "Write REPORT", "walk the dog"]
+        else:  # PostgreSQL sorts by the database's collation: "walk" before "Write" outside the C locale
+            assert ordered[:2] == ["100% effort_now", "Buy milk"]
+            assert sorted(ordered[2:]) == ["Write REPORT", "walk the dog"]
         assert titles(Todo.order_by("-priority", "title")) == [
             "100% effort_now", "Write REPORT", "walk the dog", "Buy milk"
         ]

@@ -302,7 +302,7 @@ def _rpc(client, fid, *args):
 
 def test_rpc_errors_carry_code_hint_and_request_id(rpc_client):
     wrong = _rpc(rpc_client, diag_double.id, "three").json()["error"]
-    assert wrong["code"] == "J403" and "int" in wrong["hint"] and len(wrong["request_id"]) == 4
+    assert wrong["code"] == "J403" and "int" in wrong["hint"] and len(wrong["request_id"]) == 8
     arity = _rpc(rpc_client, diag_double.id, 1, 2).json()["error"]
     assert arity["code"] == "J404" and "(n: int)" in arity["hint"]
     missing = _rpc(rpc_client, "nope.nothing").json()["error"]
@@ -571,8 +571,10 @@ def test_doctor_production_detection(tmp_path, monkeypatch):
     monkeypatch.setenv("JONGO_ENV", "development")
     assert not is_production_environment(app)
     app.dev = True
+    monkeypatch.delenv("JONGO_ENV")
+    assert not is_production_environment(app)  # RAILWAY_ENVIRONMENT under `railway run jongo dev` is local
     monkeypatch.setenv("JONGO_ENV", "production")
-    assert not is_production_environment(app)
+    assert is_production_environment(app)  # an explicit JONGO_ENV wins over a stray JONGO_DEV=1 (J502)
 
 
 def test_doctor_reports_pending_migrations_and_unreachable_databases(tmp_path):
@@ -781,4 +783,4 @@ def test_context_pack_and_scaffold_point_at_the_diagnostics(tmp_path):
 
 def test_public_api():
     assert callable(jongo.doctor) and callable(jongo.status) and callable(jongo.explain)
-    assert jongo.__version__ == "0.5.1"
+    assert jongo.__version__ == "0.5.2"

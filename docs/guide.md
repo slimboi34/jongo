@@ -750,8 +750,9 @@ server function's hints resolve, that the database is reachable (without creatin
 whether migrations are pending, the static directory, an admin user when the admin is mounted,
 optionally a port (`--port`), and — when judged as production — the secret key, dev mode,
 cookie security and the status endpoint. Production is judged when you pass `--production`,
-set `JONGO_ENV=production`, or a hosting platform's variables are present (Railway, Heroku,
-Fly, Cloud Run, Render, Vercel). `--json` gives each check as
+set `JONGO_ENV=production` (which wins even over dev mode, so a stray `JONGO_DEV=1` on a server
+fails as `J502`), or a hosting platform's variables are present (Railway, Heroku,
+Fly, Cloud Run, Render, Vercel) and dev mode is off. `--json` gives each check as
 `{"id", "status": "ok"|"warn"|"fail", "message", "hint", "code"}`; the exit code is 1 when
 any check fails, so it gates CI. From Python: `jongo.doctor(app)`.
 
@@ -786,7 +787,9 @@ short locked append per request. From Python: `jongo.status(app)` returns the sa
 It never records query strings, headers, cookies, bodies, form values or SQL parameters, never
 shows the database URL, and strips `user:password@` from error messages.
 
-**Access.** In dev mode `/_jongo/status` is open (the dev server listens on 127.0.0.1). In
+**Access.** In dev mode `/_jongo/status` is open (the dev server listens on 127.0.0.1), unless
+`JONGO_ENV=production` is set: that keeps it locked even if dev mode was switched on by mistake
+(the server logs a `J502` warning at start, and `jongo doctor` fails). In
 production it answers only a signed-in admin, or a request with
 `Authorization: Bearer $JONGO_STATUS_TOKEN` when that variable is set to 16 or more characters;
 everyone else gets a 403 (`J508`). `JONGO_STATUS=off` removes the endpoint entirely.

@@ -429,7 +429,7 @@ def format_status(data: dict, color: bool = False) -> str:
         for q in r["recent"][:10]:
             style = "31" if q["status"] >= 500 else ("33" if q["status"] >= 400 else "32")
             sql = f"  sql={q['sql']}" if q["sql"] else ""
-            lines.append(f"    {q['time'][11:]}  {q['request_id'] or '':<4}  {q['method']:<6} {q['path']:<34} "
+            lines.append(f"    {q['time'][11:]}  {q['request_id'] or '':<8}  {q['method']:<6} {q['path']:<34} "
                          + c(str(q["status"]), style) + f"  {q['ms']}ms{sql}")
     return "\n".join(lines)
 

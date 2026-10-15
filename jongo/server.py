@@ -121,6 +121,11 @@ def warn_pending_migrations() -> None:
 
 def serve(app, host="127.0.0.1", port=8000, *, migrate=None):
     setup_logging(app.dev)
+    from .diagnostics import declared_production
+
+    if app.dev and declared_production():
+        log.warning("[J502] dev mode is on but JONGO_ENV=production: error pages show tracebacks and source. "
+                    "Unset JONGO_DEV / dev=True on a deployed server (/_jongo/status still needs the token).")
     if migrate or (migrate is None and app.dev):
         try:
             auto_migrate()

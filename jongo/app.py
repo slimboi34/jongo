@@ -468,7 +468,9 @@ class Jongo:
 
     def http_error(self, request: Request, exc: HTTPError) -> Response:
         headers = {"Allow": ", ".join(exc.allowed)} if getattr(exc, "allowed", None) else {}
-        if request.path.startswith("/_jongo/rpc/") or request.path == "/_jongo/status":
+        route = getattr(request, "route", None)
+        is_status = route is not None and route.name == "_jongo_status"  # also /_jongo/status/ and //_jongo/status
+        if request.path.startswith("/_jongo/rpc/") or is_status:
             code, hint = classify(exc)
             if request.path.startswith("/_jongo/rpc/") and code in _RPC_HINTS and not getattr(exc, "hint", None):
                 hint = _RPC_HINTS[code]  # the generic hints are about forms and routes, not server calls
@@ -561,7 +563,8 @@ class Jongo:
             if fn is None:
                 raise NotFound(f"no server function {function_id!r}", code="J401")
             try:
-                payload = request.json or {}
+                # Only an empty body means "no arguments": `[]`, `null` or `0` is a malformed call (J402).
+                payload = request.json if request.body.strip() else {}
             except HTTPError as exc:
                 if exc.status != 400:  # too large stays J212
                     raise
@@ -646,7 +649,7 @@ class Jongo:
 
             if os.environ.get("JONGO_STATUS", "").lower() in ("0", "off", "false", "no"):
                 raise NotFound()
-            if not app.dev and not app._status_allowed(request):
+            if not app._status_open() and not app._status_allowed(request):
                 raise HTTPError(
                     403, "The status endpoint needs a signed-in admin or the status token in production.",
                     code="J508",
@@ -656,12 +659,18 @@ class Jongo:
         self.router.add(Route(f"{self.static_url}/<path:path>", static, name="static", kind="internal"))
         self.router.add(Route("/_jongo/status", status_view, name="_jongo_status", kind="internal"))
 
+    def _status_open(self) -> bool:
+        """/_jongo/status needs no credentials in dev mode, unless JONGO_ENV says this is production."""
+        from .diagnostics import declared_production
+
+        return self.dev and not declared_production()
+
     def _status_allowed(self, request: Request) -> bool:
         """Production access to /_jongo/status: an admin session, or ``Bearer $JONGO_STATUS_TOKEN``.
 
         The token must be at least 16 characters, so an empty or toy value never opens it.
         """
-        token = os.environ.get("JONGO_STATUS_TOKEN") or ""
+        token = (os.environ.get("JONGO_STATUS_TOKEN") or "").strip()
         supplied = request.headers.get("authorization") or ""
         if len(token) >= 16 and hmac.compare_digest(supplied.encode(), f"Bearer {token}".encode()):
             return True

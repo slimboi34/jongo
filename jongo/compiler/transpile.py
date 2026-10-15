@@ -563,13 +563,36 @@ class FunctionTranspiler:
         value = self.closure.get(func.id, self.fn.__globals__.get(func.id))
         return isinstance(value, Tag) or value is h
 
+    def _is_function(self, value) -> bool:
+        """Whether ``value`` is certainly a function: a lambda, a ``def`` in this component, or
+        a module-level/closure callable. Anything else (a string, an f-string, a local variable
+        or an attribute whose type isn't known here) is not reported, so J114 never rejects code
+        that merely sets an ``on…`` attribute (which is dropped, as before)."""
+        if isinstance(value, ast.Lambda):
+            return True
+        if not isinstance(value, ast.Name):
+            return False
+        if value.id in self._local_defs():
+            return True
+        if any(value.id in scope.locals for scope in self.scopes):
+            return False
+        target = self.closure.get(value.id, self.fn.__globals__.get(value.id))
+        return callable(target) and not isinstance(target, type)
+
+    def _local_defs(self) -> set:
+        defs = getattr(self, "_defs", None)
+        if defs is None:
+            defs = self._defs = {n.name for n in ast.walk(self.node)
+                                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not self.node}
+        return defs
+
     def x_Call(self, node):
         func = node.func
         if isinstance(func, ast.Name) and func.id == "super":
             self.error(node, "super() isn't supported in browser code")
         if node.keywords and self._is_element_factory(func):
             for k in node.keywords:
-                if k.arg and _MISNAMED_EVENT.fullmatch(k.arg) and not isinstance(k.value, ast.Constant):
+                if k.arg and _MISNAMED_EVENT.fullmatch(k.arg) and self._is_function(k.value):
                     event = k.arg[2:].lower()
                     self.error(k.value if hasattr(k.value, "lineno") else node,
                                f"{k.arg}= isn't an event handler, so this function would never be called",

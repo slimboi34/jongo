@@ -800,7 +800,12 @@ function $report(err) {
   }
   const name = (err && err.name) || "Error";
   const message = err && err.message !== undefined ? err.message : String(err);
-  box.textContent = `${name}: ${message}${err && err.traceback ? "\n\n" + err.traceback : ""}`;
+  // Jongo's codes only: DOMException and friends have numeric .code values of their own.
+  const coded = err && typeof err.code === "string" && /^J\d{3}$/.test(err.code) ? err.code : null;
+  const code = coded ? `[${coded}] ` : "";
+  const hint = coded && err.hint ? `\nhint: ${err.hint}` : "";
+  const more = coded ? `\nmore: jongo explain ${coded}` : "";
+  box.textContent = `${code}${name}: ${message}${hint}${more}${err && err.traceback ? "\n\n" + err.traceback : ""}`;
 }
 
 function $liveReload() {

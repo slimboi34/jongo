@@ -86,13 +86,23 @@ def _port_check(port: int) -> dict:
 PRODUCTION_SIGNALS = ("RAILWAY_ENVIRONMENT", "DYNO", "FLY_APP_NAME", "K_SERVICE", "RENDER", "VERCEL_ENV")
 
 
+def declared_production() -> bool:
+    """``JONGO_ENV=production`` (or ``prod``): the operator said this is a deployed server."""
+    return os.environ.get("JONGO_ENV", "").strip().lower() in ("production", "prod")
+
+
 def is_production_environment(app) -> bool:
-    """Judge as production when JONGO_ENV says so or a hosting platform's variables are set — never in dev mode."""
-    if app.dev:
-        return False
-    env = os.environ.get("JONGO_ENV", "").lower()
+    """Judge as production when JONGO_ENV says so or a hosting platform's variables are set.
+
+    An explicit ``JONGO_ENV=production`` wins even over dev mode, so a stray ``JONGO_DEV=1``
+    on a deployed server fails the check (J502) instead of hiding every production check.
+    A platform's variables alone don't count in dev mode (``railway run jongo dev`` is local).
+    """
+    env = os.environ.get("JONGO_ENV", "").strip().lower()
     if env:
         return env in ("production", "prod")
+    if app.dev:
+        return False
     return any(os.environ.get(name) for name in PRODUCTION_SIGNALS)
 
 
@@ -176,8 +186,8 @@ def _app_checks(app, production: bool) -> list[dict]:
                                    "session cookies are marked Secure only when the app itself sees HTTPS; behind "
                                    "a TLS-terminating proxy they won't be", code="J507"))
 
-    token = os.environ.get("JONGO_STATUS_TOKEN") or ""
-    if app.dev:
+    token = (os.environ.get("JONGO_STATUS_TOKEN") or "").strip()
+    if app.dev and not declared_production():
         checks.append(check_result("status_endpoint", "ok", "/_jongo/status is open (dev mode)"))
     elif token and len(token) < 16:
         checks.append(check_result("status_endpoint", "warn",
