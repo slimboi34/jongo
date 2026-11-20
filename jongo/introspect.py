@@ -14,8 +14,11 @@ it can load at once, and it needs its mistakes reported as data it can act on.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import json
+import sys
+import textwrap
 import typing
 from pathlib import Path
 from typing import Any
@@ -52,6 +55,8 @@ def _where(obj, root: Path) -> tuple[str | None, int | None]:
 def _type_name(hint) -> str | None:
     if hint is None or hint is inspect.Parameter.empty:
         return None
+    if getattr(hint, "__jongo_schema__", False):  # a forms.Schema: its name, not its contents
+        return hint.__name__
     if hint is type(None):
         return "None"
     if isinstance(hint, type):
@@ -100,13 +105,31 @@ def _doc(obj) -> str | None:
 
 
 def describe(app) -> dict:
-    """The app as data: every page, route, server function, model, component and channel."""
+    """The app as data: every page, route, server function, model, component, channel and form schema.
+
+    Read from the live registries, so it describes the code that is actually loaded.
+
+    Returns:
+        A JSON-able dict with the keys ``jongo`` (the version), ``app`` (name, title,
+        database, admin path, layout, MCP path), ``models``, ``server_functions`` (each with
+        its ``signature``, ``params``, ``rate_limit`` and a JSON Schema ``input_schema``),
+        ``pages``, ``routes``, ``components``, ``channels`` and ``schemas`` (the
+        ``forms.Schema`` definitions, with the functions that use each).
+
+    Example::
+
+        from jongo import describe
+
+        for fn in describe(app)["server_functions"]:
+            print(fn["signature"], fn["input_schema"]["required"])
+    """
     from . import __version__
     from .db import connection
     from .db.fields import NOTHING, ForeignKey
     from .db.models import Model, models_registry
     from .rpc import SERVER_FUNCTIONS
     from .routing import _ANNOTATION_CONVERTERS, _PARAM
+    from .schema import function_schema
     from .vdom import COMPONENTS
 
     root = app.root
@@ -139,6 +162,7 @@ def describe(app) -> dict:
             "doc": _doc(r.handler),
             "login_required": bool(r.options.get("login_required")),
             "admin_required": bool(r.options.get("admin_required")),
+            "rate_limit": str(r.options["rate_limit"]) if r.options.get("rate_limit") is not None else None,
         }
         if r.kind == "page":
             entry["title"] = r.options.get("title")
@@ -150,6 +174,7 @@ def describe(app) -> dict:
 
     # -- server functions -------------------------------------------------------------------
     server_functions = []
+    schema_users: dict[int, list[str]] = {}
     for sf in SERVER_FUNCTIONS.values():
         if not _belongs_to_app(sf.fn):
             continue
@@ -164,6 +189,7 @@ def describe(app) -> dict:
             "admin_required": bool(sf.admin_required),
             "refresh": bool(sf.refresh),
             "takes_request": bool(sf.wants_request),
+            "rate_limit": str(sf.rate_limit) if getattr(sf, "rate_limit", None) is not None else None,
         }
         try:
             hints = sf.hints
@@ -180,10 +206,14 @@ def describe(app) -> dict:
                 param["default"] = _jsonable(p.default)
             if isinstance(hint, type) and issubclass(hint, Model):
                 param["model"] = hint.__name__
+            if getattr(hint, "__jongo_schema__", False):
+                param["schema"] = hint.__name__
+                schema_users.setdefault(id(hint), []).append(sf.fn.__name__)
             params.append(param)
         entry["params"] = params
         entry["returns"] = _type_name(hints.get("return"))
         entry["signature"] = _signature(sf.fn, hints)
+        entry["input_schema"] = function_schema(sf)
         server_functions.append(entry)
     server_functions.sort(key=lambda e: (e["file"] or "", e["line"] or 0))
 
@@ -245,6 +275,29 @@ def describe(app) -> dict:
         })
     components.sort(key=lambda e: (e["file"] or "", e["line"] or 0))
 
+    # -- form schemas ------------------------------------------------------------------------
+    schemas = []
+    forms_module = sys.modules.get("jongo.forms")  # no schema can exist unless it was imported
+    for schema in (forms_module.SCHEMAS.values() if forms_module is not None else ()):
+        if not _belongs_to_app(schema):
+            continue
+        file = schema.file
+        if file:
+            try:
+                file = str(Path(file).resolve().relative_to(root))
+            except (ValueError, OSError):
+                pass
+        fields = []
+        for fname, rule in schema.items():
+            field = {"name": fname, "type": rule["type"], "required": bool(rule["required"]), "label": rule["label"]}
+            for key in ("min_length", "max_length", "min", "max", "pattern", "choices", "same_as", "default"):
+                if key in rule:
+                    field[key] = rule[key]
+            fields.append(field)
+        schemas.append({"name": schema.__name__, "fields": fields, "file": file, "line": schema.line,
+                        "used_by": sorted(schema_users.get(id(schema), []))})
+    schemas.sort(key=lambda e: (e["file"] or "", e["line"] or 0))
+
     # -- channels ---------------------------------------------------------------------------
     channels = [
         {"pattern": ch.pattern, "guard": ch.name, "params": sorted(ch.params)}
@@ -278,6 +331,7 @@ def describe(app) -> dict:
             "admin": min(admin_paths, key=len) if admin_paths else None,
             "layout": app.layout_component.name if app.layout_component is not None else None,
             "login_url": app.login_url,
+            "mcp": getattr(app, "mcp_path", None),
         },
         "models": models,
         "server_functions": server_functions,
@@ -285,6 +339,7 @@ def describe(app) -> dict:
         "routes": routes,
         "components": components,
         "channels": channels,
+        "schemas": schemas,
     }
 
 
@@ -314,6 +369,12 @@ A first parameter named `request` receives the request (`request.user`, `request
 `@server(login_required=True)` requires a signed-in user. Raise `Forbidden`, `NotFound` or \
 `db.ValidationError({"field": "message"})` for errors the browser may read; any other exception is a bare \
 "Server error". `refresh=True` re-runs the page loader after a successful call.
+- **Forms validate once, in both places.** `from jongo import forms`; `Signup = forms.Schema("Signup", \
+email=forms.Email(), age=forms.Int(min=18))` (also `Text`, `Float`, `Bool`, `Choice`, and \
+`forms.Schema.from_model(Model)`). In a component, `forms.validate(Signup, form_values(event))` returns \
+`{field: message}` (the same Python, compiled); on the server, annotate the parameter `data: Signup` and the \
+function receives the cleaned dict or the browser gets a 400 with `errors`. `forms.Field(schema=Signup, \
+name="email", error=...)` renders the control. Patterns must be plain regular expressions (no `(?i)`, no named groups).
 - **Events** hand the handler an event: `on_click=lambda e: ...`, `on_input=lambda e: draft.set(e.target.value)`, \
 `on_submit=add` (an `async def add(event)` may `await` server functions); always `on_<event>=`, never React's `onClick=` (a compile error, J114). `js.setTimeout`, `js.document` \
 and friends reach the browser from Python.
@@ -324,11 +385,14 @@ and `jongo migrate` (no migration files). Query with `Model.all()`, `.filter(fie
 `Jongo(database="postgres://...")` runs the same code on PostgreSQL.
 - **Real time**: `@app.channel("room:<int:id>")` declares a channel and its function decides who may \
 subscribe; `broadcast(channel, data)` pushes from anywhere on the server; `live(channel, handler)` in a \
-component receives it. An undeclared channel cannot be subscribed to.
+component receives it. An undeclared channel cannot be subscribed to, and the guard must `return True` to \
+allow one: returning nothing refuses (J412).
 - **Styles** are Python: `s = css(card={"padding": 12, ":hover": {...}})` then `class_=s.card`; \
 `global_css({...})` for page-wide rules.
 - **Auth, sessions, CSRF and the admin are built in**: `app.admin()` mounts the admin; `jongo createadmin` \
-makes a user; `login_required=True` on pages, routes and server functions.
+makes a user; `login_required=True` on pages, routes and server functions. `authenticate(username, password, \
+request)` throttles wrong passwords by itself (429, J213); `auth.revoke_sessions(user)` signs a user out \
+everywhere. `rate_limit="5/minute"` on `@server`, `@app.page` or `@app.route` caps one caller.
 - **Browser differences** (JavaScript's value model): `str(10 / 2)` is `"5"` (format explicitly), a dict \
 keyed by ints iterates string keys, `isinstance(5, float)` is `True`. Tuples and strings behave as in Python.
 - **Test through the real stack**: `from jongo.testing import TestClient`; `client = TestClient(app)`; \
@@ -362,6 +426,10 @@ def context(app) -> str:
         "setup (Python, database reachable, pending migrations, compile errors, production settings) and "
         "exits 1 on a failure. With the app running, `jongo status --json` shows the recent requests, errors "
         "(code, traceback, request id), per-route counters and likely N+1 queries.",
+        "- **Tools instead of commands:** `jongo mcp` serves all of the above, plus every `@server` function, "
+        "as MCP tools over stdio (`claude mcp add app -- jongo mcp`)."
+        + (f" The running server also answers MCP at `{a['mcp']}`." if a.get("mcp") else "")
+        + " `jongo openapi` prints the OpenAPI document generated from the type hints.",
         f"- Database: {a['database']['backend']} ({a['database']['database']})." if a["database"] else
         "- Database: not configured (pass `database=` to `Jongo(...)`).",
         f"- Admin: mounted at `{a['admin']}`." if a["admin"] else "- Admin: not mounted (`app.admin()` would).",
@@ -413,6 +481,8 @@ def context(app) -> str:
             flags.append("login required")
         if s["refresh"]:
             flags.append("refreshes the page after")
+        if s.get("rate_limit"):
+            flags.append(f"limited to {s['rate_limit']}")
         where = f" · `{s['file']}:{s['line']}`" if s["file"] else ""
         lines.append(f"- `{s['signature']}`{where}" + (f" · {', '.join(flags)}" if flags else ""))
         if s.get("doc"):
@@ -438,6 +508,27 @@ def context(app) -> str:
         lines.append(f"- `{c['name']}({props})`{where}{tag}")
         if c.get("doc"):
             lines.append(f"  _{c['doc']}_")
+    if d["schemas"]:
+        lines += ["", f"## Form schemas ({len(d['schemas'])})", "",
+                  "Validated by the same code in the browser (`forms.validate`) and on the server "
+                  "(a `@server` parameter annotated with the schema).", ""]
+        for sc in d["schemas"]:
+            where = f" · `{sc['file']}:{sc['line']}`" if sc["file"] else ""
+            used = f" · used by {', '.join(f'`{u}`' for u in sc['used_by'])}" if sc["used_by"] else ""
+            lines.append(f"### `{sc['name']}`{where}{used}")
+            lines += ["", "| field | type | rules |", "|---|---|---|"]
+            for f in sc["fields"]:
+                notes = ["required" if f["required"] else "optional"]
+                for key, label in (("min_length", "min length"), ("max_length", "max length"), ("min", "min"),
+                                   ("max", "max"), ("same_as", "must match"), ("default", "default")):
+                    if key in f:
+                        notes.append(f"{label} {f[key]!r}" if key in ("same_as", "default") else f"{label} {f[key]}")
+                if "choices" in f:
+                    notes.append("one of " + ", ".join(repr(c) for c in f["choices"]))
+                if "pattern" in f and f["type"] != "email":
+                    notes.append(f"pattern `{f['pattern']}`")
+                lines.append(f"| `{f['name']}` | {f['type']} | {'; '.join(notes)} |")
+            lines.append("")
     if d["channels"]:
         lines += ["", f"## Channels ({len(d['channels'])})", ""]
         for ch in d["channels"]:
@@ -450,6 +541,8 @@ def _route_line(r: dict) -> str:
     methods = ",".join(r["methods"])
     params = f" · params {', '.join(f'{k}:{v}' for k, v in r['params'].items())}" if r["params"] else ""
     guard = " · admin only" if r["admin_required"] else (" · login required" if r["login_required"] else "")
+    if r.get("rate_limit"):
+        guard += f" · limited to {r['rate_limit']}"
     where = f" · `{r['file']}:{r['line']}`" if r["file"] else ""
     title = f" · title {r['title']!r}" if r.get("title") else ""
     return f"- {methods} `{r['path']}` → `{r['name']}`{params}{title}{guard}{where}"
@@ -483,6 +576,36 @@ def _plan_without_writing(db) -> list:
         connection.configure(path)
 
 
+def _guard_never_answers(guard) -> bool:
+    """True when a channel guard's source has no ``return <value>`` and no ``raise`` at all.
+
+    Such a guard returns None for everyone, which refuses every subscription (J412). It is
+    a static read of the function's own body; a guard whose source can't be read, or that
+    answers on only some paths, is left to the run-time check.
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(inspect.unwrap(guard))))
+    except (OSError, TypeError, SyntaxError, IndentationError):
+        return False
+    function = tree.body[0] if tree.body else None
+    if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    pending = list(function.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue  # a nested function's return isn't the guard's
+        if isinstance(node, ast.Raise):
+            return False
+        if isinstance(node, ast.Return) and node.value is not None and not (
+                isinstance(node.value, ast.Constant) and node.value.value is None):
+            return False
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return False
+        pending.extend(ast.iter_child_nodes(node))
+    return True
+
+
 def check(app) -> dict:
     """Compile, resolve, plan — and report every problem as data.
 
@@ -490,6 +613,10 @@ def check(app) -> dict:
     a ``problems`` list with ``kind``, ``message`` and, where known, ``file``, ``line``
     and ``hint``, the counts of what was found, and the migrations ``jongo dev`` would
     apply. Nothing is written.
+
+    Problem kinds: ``compile`` (a component can't be compiled), ``server_function`` (a
+    type hint can't be resolved), ``channel`` (a guard that never returns a value, so it
+    refuses everyone: ``J412``) and ``migrations`` (the schema couldn't be planned).
     """
     from . import __version__
 
@@ -517,6 +644,16 @@ def check(app) -> dict:
                              "hint": "Every parameter of a @server function needs an annotation Jongo can "
                                      "resolve; define the model at module level or annotate with a real class."})
 
+    for channel in app.channels:
+        if _guard_never_answers(channel.guard):
+            file, line = _where(channel.guard, app.root)
+            problems.append({
+                "kind": "channel", "code": "J412", "name": channel.name, "file": file, "line": line,
+                "message": f"the guard {channel.name}() for channel {channel.pattern!r} never returns a value, "
+                           "so every subscription is refused",
+                "hint": "return True to allow the subscription and False to refuse it",
+            })
+
     pending: list[dict] = []
     if d["app"]["database"] is not None:
         from . import db
@@ -541,6 +678,7 @@ def check(app) -> dict:
         "app": d["app"]["name"],
         "ok": not problems,
         "problems": problems,
-        "counts": {k: len(d[k]) for k in ("models", "server_functions", "pages", "routes", "components", "channels")},
+        "counts": {k: len(d[k]) for k in ("models", "server_functions", "pages", "routes", "components", "channels",
+                                          "schemas")},
         "pending_migrations": pending,
     }

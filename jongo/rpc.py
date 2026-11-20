@@ -20,6 +20,7 @@ import functools
 import inspect
 import math
 import re
+import sys
 import types
 import typing
 
@@ -29,8 +30,12 @@ SERVER_FUNCTIONS: dict[str, "ServerFunction"] = {}
 
 
 class ServerFunction:
-    def __init__(self, fn, *, login_required=False, admin_required=False, refresh=False):
+    def __init__(self, fn, *, login_required=False, admin_required=False, refresh=False, rate_limit=None):
+        from .ratelimit import parse as _parse_rate
+
         functools.update_wrapper(self, fn)
+        #: The parsed ``rate_limit=`` (a :class:`jongo.ratelimit.RateLimit`), or None.
+        self.rate_limit = _parse_rate(rate_limit)
         self.fn = fn
         self.id = f"{fn.__module__}.{fn.__qualname__}".replace(".<locals>", "")
         self.login_required = login_required or admin_required
@@ -77,6 +82,10 @@ class ServerFunction:
         from .db.models import models_registry
 
         models = {model.__name__: model for model in models_registry.values()}
+        forms = sys.modules.get("jongo.forms")
+        if forms is not None:  # form schemas defined where get_type_hints can't see, by their name
+            models.update({schema.__name__: schema for schema in forms.SCHEMAS.values()
+                           if schema.__name__ not in models})
         try:  # most often a model class defined somewhere get_type_hints can't see
             return typing.get_type_hints(self.fn, localns=models)
         except Exception:
@@ -135,6 +144,10 @@ class ServerFunction:
             raise HTTPError(401, "Please log in first", code="J208")
         if self.admin_required and not getattr(user, "is_admin", False):
             raise HTTPError(403, "Admins only", code="J209")
+        if self.rate_limit is not None:
+            from .ratelimit import check as _check_rate
+
+            _check_rate(request, self.rate_limit, f"@server {self.id}")
         if not isinstance(args, list) or not isinstance(kwargs, dict):
             raise HTTPError(400, 'malformed server function call: "args" must be a list and "kwargs" an object',
                             code="J402")
@@ -188,15 +201,31 @@ def _run_sync(awaitable):
         return pool.submit(lambda: asyncio.run(_await(awaitable))).result()
 
 
-def server(fn=None, *, login_required=False, admin_required=False, refresh=False):
+def server(fn=None, *, login_required=False, admin_required=False, refresh=False, rate_limit=None):
     """Expose a function to browser code.
 
-    ``refresh=True`` re-runs the current page's loader after each successful call,
-    so data rendered from the page updates without extra code.
+    Parameters:
+        login_required: refuse callers who aren't signed in (401, ``J208``).
+        admin_required: refuse callers who aren't admins (403, ``J209``).
+        refresh: re-run the current page's loader after each successful call, so data
+            rendered from the page updates without extra code.
+        rate_limit: a cap per caller, e.g. ``"5/minute"`` (see :mod:`jongo.ratelimit`). The
+            caller is the signed-in user, or the client address when anonymous. Over the
+            limit the function doesn't run and the browser gets a 429 (``J213``).
+
+    A parameter annotated with a :class:`jongo.forms.Schema` is validated against it and
+    arrives as the cleaned dict.
+
+    Example::
+
+        @server(login_required=True, rate_limit="5/minute")
+        def send_invite(request, email: str) -> dict:
+            return Invite.create(email=email).to_dict()
     """
 
     def wrap(f):
-        return ServerFunction(f, login_required=login_required, admin_required=admin_required, refresh=refresh)
+        return ServerFunction(f, login_required=login_required, admin_required=admin_required, refresh=refresh,
+                              rate_limit=rate_limit)
 
     return wrap(fn) if fn is not None else wrap
 
@@ -226,6 +255,12 @@ def coerce(value, hint, name="value"):
     """Check ``value`` (decoded JSON) against a type hint, converting where it's safe."""
     if hint is typing.Any or hint is inspect.Parameter.empty or hint is object:
         return value
+    if getattr(hint, "__jongo_schema__", False):  # a jongo.forms.Schema: validate, return the cleaned dict
+        if not isinstance(value, dict):
+            raise _arg_error(f"argument {name!r} must be an object with the fields "
+                             f"{', '.join(hint) or '(none)'}, got {type(value).__name__}",
+                             f"send {name} as a dict, e.g. form_values(event)")
+        return hint.clean(value)
     origin = typing.get_origin(hint)
     args = typing.get_args(hint)
 

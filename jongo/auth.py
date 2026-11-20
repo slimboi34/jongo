@@ -12,6 +12,17 @@
 
 ``request.user`` is the logged-in User (or None) everywhere: pages, routes and
 server functions.
+
+Two protections are on without configuration:
+
+* **Password guessing is throttled.** After :data:`LOGIN_ATTEMPTS` wrong passwords for one
+  username inside :data:`LOGIN_WINDOW` seconds, ``authenticate()`` raises a 429
+  (:class:`jongo.ratelimit.TooManyRequests`, code ``J213``) instead of checking another one.
+* **Sign-ins can be revoked from the server.** Every ``login()`` is a row in
+  ``jongo_sessions``; ``logout()`` deletes it, and so can you: :func:`sessions` lists a
+  user's sign-ins, :func:`revoke_session` ends one and :func:`revoke_sessions` ends them
+  all. A cookie whose row is gone is signed out on its next request, even though the
+  cookie itself is still correctly signed.
 """
 from __future__ import annotations
 
@@ -19,12 +30,33 @@ import base64
 import hashlib
 import hmac
 import secrets
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 
 from . import db
+from .ratelimit import RateLimit, TooManyRequests, limiter
+
+__all__ = [
+    "User", "LoginSession", "authenticate", "login", "logout", "get_user", "sessions", "revoke_session",
+    "revoke_sessions", "hash_password", "verify_password", "session_data_for",
+    "LOGIN_ATTEMPTS", "LOGIN_WINDOW", "LOGIN_ATTEMPTS_PER_ADDRESS",
+]
 
 ALGORITHM = "pbkdf2_sha256"
 ITERATIONS = 480_000
+
+#: Wrong passwords allowed for one username inside :data:`LOGIN_WINDOW` before
+#: ``authenticate()`` refuses to check another. Set to ``None`` to turn the throttle off.
+LOGIN_ATTEMPTS: int | None = 10
+#: Wrong passwords allowed from one client address inside :data:`LOGIN_WINDOW`, across all
+#: usernames (only counted when ``authenticate()`` is given the request).
+LOGIN_ATTEMPTS_PER_ADDRESS: int | None = 50
+#: The length of the throttle window, in seconds.
+LOGIN_WINDOW: int = 300
+
+#: How stale ``last_seen`` may get before a request refreshes it (seconds). Keeps an
+#: authenticated request to reads only, most of the time.
+_TOUCH_EVERY = 300
 
 
 def hash_password(password: str, *, iterations: int | None = None) -> str:
@@ -93,12 +125,73 @@ class User(db.Model):
         return user
 
 
-def authenticate(username: str, password: str) -> User | None:
+def _throttle_keys(username: str, request) -> list[tuple[str, RateLimit]]:
+    keys = []
+    if LOGIN_ATTEMPTS:
+        keys.append((f"login|user:{str(username).strip().lower()[:150]}", RateLimit(LOGIN_ATTEMPTS, LOGIN_WINDOW)))
+    if LOGIN_ATTEMPTS_PER_ADDRESS and request is not None:
+        address = getattr(request, "client_ip", None) or getattr(request, "remote_addr", "") or "unknown"
+        keys.append((f"login|ip:{address}", RateLimit(LOGIN_ATTEMPTS_PER_ADDRESS, LOGIN_WINDOW)))
+    return keys
+
+
+def authenticate(username: str, password: str, request=None) -> User | None:
+    """Check a username and password; return the User, or None if they don't match.
+
+    Wrong passwords are counted per username (and per client address when ``request`` is
+    passed). Past :data:`LOGIN_ATTEMPTS` failures in :data:`LOGIN_WINDOW` seconds the
+    password is no longer checked at all: the call raises, so guessing gains nothing and
+    costs the server no hashing. A correct password clears the username's count.
+
+    Parameters:
+        username: the account name.
+        password: the password as typed.
+        request: the current request (optional). Passing it also throttles by client
+            address, which stops one machine from trying a few passwords on many accounts.
+
+    Returns:
+        The :class:`User`, or ``None`` for a wrong username or password.
+
+    Raises:
+        jongo.ratelimit.TooManyRequests: a 429 with code ``J213`` and ``retry_after``
+            seconds, once the caller is over the limit. Raised from a page, route or
+            server function it becomes the response; catch it to show your own message.
+
+    Example::
+
+        @server
+        def sign_in(request, username: str, password: str):
+            user = authenticate(username, password, request)
+            if user is None:
+                raise HTTPError(400, "Wrong username or password")
+            login(request, user)
+            return redirect("/")
+    """
+    keys = _throttle_keys(username, request)
+    # Count the attempt before checking it. Checking first and counting afterwards would let
+    # a burst of parallel guesses all read "under the limit" and all be tried.
+    counted = []
+    for key, limit in keys:
+        allowed, retry_after = limiter.hit(key, limit)
+        if not allowed:
+            for earlier in counted:
+                limiter.refund(earlier)
+            raise TooManyRequests(
+                f"Too many failed sign-in attempts. Try again in {retry_after}s.", retry_after=retry_after,
+                hint="wait for the window to pass; jongo.auth.LOGIN_ATTEMPTS and LOGIN_WINDOW set the limit",
+            )
+        counted.append(key)
     user = User.filter(username=username).first()
     if user is None:
         verify_password(password, _dummy())  # same work either way, so timing reveals nothing
         return None
-    return user if user.check_password(password) else None
+    if not user.check_password(password):
+        return None
+    for key in counted:  # a correct password was never a guess
+        limiter.refund(key)
+    if counted and LOGIN_ATTEMPTS:
+        limiter.reset(counted[0])
+    return user
 
 
 def _fingerprint(user: User) -> str:
@@ -106,28 +199,248 @@ def _fingerprint(user: User) -> str:
     return hashlib.sha256(f"jongo-auth:{user.password}".encode()).hexdigest()[:20]
 
 
-def session_data_for(user: User) -> dict:
-    return {"_uid": user.id, "_pw": _fingerprint(user)}
+# ---------------------------------------------------------------------------
+# Server-side sign-in records
+
+
+class LoginSession(db.Model):
+    """One sign-in: the server's record of a session cookie it issued.
+
+    The cookie carries a random id; the table stores only its SHA-256, so the rows are no
+    use to anyone who reads the database. Deleting a row signs that browser out.
+    """
+
+    key = db.Text(max_length=64, unique=True, editable=False)
+    user = db.ForeignKey(User, on_delete="CASCADE", related_name="login_sessions")
+    created = db.DateTime(auto_now_add=True)
+    last_seen = db.DateTime(null=True, editable=False)
+    ip = db.Text(max_length=64, blank=True, default="", editable=False)
+    user_agent = db.Text(max_length=200, blank=True, default="", editable=False)
+
+    class Meta:
+        table = "jongo_sessions"
+        ordering = ["-id"]
+        verbose_name = "login session"
+
+    def to_dict(self) -> dict:
+        data = super().to_dict()
+        data.pop("key", None)  # the hash stays on the server
+        return data
+
+    def __str__(self):
+        return f"session {self.pk} (user {self.user_id})"
+
+
+def _key_for(sid: str) -> str:
+    return hashlib.sha256(f"jongo-session:{sid}".encode()).hexdigest()
+
+
+_table_lock = threading.Lock()
+_table_ready: tuple | None = None
+
+
+def _ensure_table() -> None:
+    """Create ``jongo_sessions`` if this database doesn't have it yet.
+
+    An app upgraded from 0.5 has users but not this table, and ``jongo run`` doesn't
+    migrate unless asked. Creating one framework-owned table is additive and safe, and the
+    alternative is every login failing until someone runs ``jongo migrate``.
+    """
+    global _table_ready
+    from .db import connection
+    from .db.migrate import _apply, live_tables, plan_migrations
+
+    marker = (connection.database_path(), connection._generation)
+    if _table_ready == marker:
+        return
+    with _table_lock:
+        if _table_ready == marker:
+            return
+        with connection.locked() as conn:
+            tables = live_tables(conn)
+            if LoginSession._meta.table not in tables and User._meta.table in tables:
+                operations = [op for op in plan_migrations([User, LoginSession])
+                              if op.table == LoginSession._meta.table and not op.destructive]
+                with connection.transaction():
+                    for op in operations:
+                        _apply(conn, op)
+        _table_ready = (connection.database_path(), connection._generation)
+
+
+def _open_session(user: User, request=None) -> str:
+    """Record a sign-in and return the random id that goes into the cookie."""
+    _ensure_table()
+    sid = secrets.token_urlsafe(24)
+    max_age = getattr(getattr(request, "app", None), "session_max_age", None)
+    if max_age:  # rows whose cookie has expired anyway
+        LoginSession.filter(created__lt=datetime.now(timezone.utc) - timedelta(seconds=max_age)).delete()
+    headers = getattr(request, "headers", None)
+    LoginSession.create(
+        key=_key_for(sid), user_id=user.id, last_seen=datetime.now(timezone.utc),
+        ip=(getattr(request, "client_ip", "") or "")[:64],
+        user_agent=((headers.get("user-agent") if headers is not None else "") or "")[:200],
+    )
+    return sid
+
+
+def session_data_for(user: User, request=None) -> dict:
+    """The session contents that sign ``user`` in, recording the sign-in on the server.
+
+    ``login()`` uses this; so does ``TestClient.login()``. Call it yourself only when you
+    build a session cookie by hand.
+
+    Parameters:
+        user: the account to sign in.
+        request: the current request, if there is one (its address and user agent are
+            stored with the sign-in so the user can recognise it in a list).
+
+    Returns:
+        ``{"_uid": ..., "_pw": ..., "_sid": ...}`` to put in ``request.session``.
+    """
+    return {"_uid": user.id, "_pw": _fingerprint(user), "_sid": _open_session(user, request)}
 
 
 def login(request, user: User) -> None:
+    """Sign ``user`` in on this request's session.
+
+    Clears whatever the session held (so a pre-login session id can't be reused), records
+    the sign-in in ``jongo_sessions`` and sets ``request.user``.
+
+    Example::
+
+        user = authenticate(username, password, request)
+        if user is not None:
+            login(request, user)
+    """
+    _end_current(request)
     request.session.clear()
-    request.session.update(session_data_for(user))
+    request.session.update(session_data_for(user, request))
     user.last_login = datetime.now(timezone.utc)
     user.save()
     request.user = user
 
 
+def _end_current(request) -> None:
+    sid = request.session.get("_sid")
+    if sid:
+        try:
+            _ensure_table()
+            LoginSession.filter(key=_key_for(str(sid))).delete()
+        except Exception:  # signing out must not fail because the record couldn't be removed
+            pass
+
+
 def logout(request) -> None:
+    """Sign this request's session out and delete its server-side record.
+
+    The cookie is cleared in the browser *and* stops working on the server, so a copy of
+    it taken earlier is dead too.
+    """
+    _end_current(request)
     request.session.clear()
     request.user = None
+    request.login_session = None
 
 
 def get_user(request) -> User | None:
+    """The user this request's session belongs to, or None.
+
+    A session counts only if its cookie is correctly signed, the password hasn't changed
+    since it was issued, **and** its row in ``jongo_sessions`` still exists and hasn't
+    outlived ``session_max_age``. Cookies issued before 0.6.0 carry no server-side id and
+    are treated as signed out.
+    """
     uid = request.session.get("_uid")
-    if not uid:
+    sid = request.session.get("_sid")
+    if not uid or not sid:
+        return None
+    _ensure_table()
+    record = LoginSession.filter(key=_key_for(str(sid)), user_id=uid).first()
+    if record is None:
+        return None
+    now = datetime.now(timezone.utc)
+    max_age = getattr(getattr(request, "app", None), "session_max_age", None)
+    if max_age and record.created is not None and now - _aware(record.created) > timedelta(seconds=max_age):
+        record.delete()
         return None
     user = User.filter(id=uid).first()
     if user is None or not hmac.compare_digest(str(request.session.get("_pw", "")), _fingerprint(user)):
         return None
+    if record.last_seen is None or (now - _aware(record.last_seen)).total_seconds() > _TOUCH_EVERY:
+        LoginSession.filter(id=record.id).update(last_seen=now)
+        record.last_seen = now
+    request.login_session = record
     return user
+
+
+def _aware(moment: datetime) -> datetime:
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def sessions(user: User) -> list[LoginSession]:
+    """A user's active sign-ins, newest first.
+
+    Each has ``id``, ``created``, ``last_seen``, ``ip`` and ``user_agent`` (``to_dict()``
+    gives them JSON-ready), enough for a "where you're signed in" list.
+
+    Example::
+
+        @server(login_required=True)
+        def my_sessions(request) -> list:
+            return [s.to_dict() for s in sessions(request.user)]
+    """
+    _ensure_table()
+    return list(LoginSession.filter(user_id=user.id))
+
+
+def revoke_session(session, user: User | None = None) -> bool:
+    """End one sign-in. The browser holding it is signed out on its next request.
+
+    Parameters:
+        session: a :class:`LoginSession` or its ``id``.
+        user: when given, only a session belonging to this user is revoked. Pass
+            ``request.user`` when the id came from the browser, so nobody can end someone
+            else's session by guessing ids.
+
+    Returns:
+        True if a session was ended, False if there was none to end.
+
+    Example::
+
+        @server(login_required=True)
+        def sign_out_device(request, session_id: int) -> bool:
+            return revoke_session(session_id, user=request.user)
+    """
+    _ensure_table()
+    pk = session.pk if isinstance(session, LoginSession) else session
+    found = LoginSession.filter(id=pk)
+    if user is not None:
+        found = found.filter(user_id=user.id)
+    return found.delete() > 0
+
+
+def revoke_sessions(user: User, *, keep=None) -> int:
+    """End every sign-in a user has: "sign out everywhere".
+
+    Parameters:
+        user: whose sessions to end.
+        keep: a request (or a :class:`LoginSession`) to spare, so "sign out my *other*
+            devices" doesn't sign out the one asking.
+
+    Returns:
+        How many sessions were ended.
+
+    Example::
+
+        revoke_sessions(user)                       # an admin locking an account
+        revoke_sessions(request.user, keep=request) # everywhere but here
+    """
+    _ensure_table()
+    found = LoginSession.filter(user_id=user.id)
+    spare = keep if isinstance(keep, LoginSession) else getattr(keep, "login_session", None)
+    if keep is not None and spare is None and hasattr(keep, "session"):
+        sid = keep.session.get("_sid")  # a request whose user hasn't been loaded yet
+        spare = LoginSession.filter(key=_key_for(str(sid))).first() if sid else None
+    if spare is not None:
+        found = found.exclude(id=spare.pk)
+    return found.delete()

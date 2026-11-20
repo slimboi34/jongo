@@ -1,5 +1,113 @@
 # Changelog
 
+## 0.6.0 (2026-11-20)
+
+**Contracts.** The types an app already declares now do four more jobs: they validate a form
+in the browser and on the server from one definition, they describe the app as an OpenAPI
+document, they turn it into tools a coding agent can call, and the three security items left
+open by the 0.4.1 audit are closed. Still zero dependencies.
+
+Read "Changed" before upgrading: two security defaults are stricter.
+
+### Added
+
+- **Form schemas: one set of validation rules for the browser and the server**
+  (`jongo/forms.py`, guide §23). `forms.Schema("Signup", email=forms.Email(),
+  seats=forms.Int(min=1), ...)` with `Text`, `Email`, `Int`, `Float`, `Bool` and `Choice`
+  rules (`required`, `min_length`/`max_length`, `min`/`max`, `pattern`, `same_as`, `choices`,
+  `default`, custom `messages`), or `forms.Schema.from_model(Model)`.
+  - In a component, `forms.validate(schema, values)` and `forms.check(rule, value)` are the
+    same Python, compiled to JavaScript, with the schema inlined as data.
+  - On the server, a `@server` parameter annotated with a schema is validated before the
+    function runs and arrives as the cleaned dict (typed, stripped, defaults applied, and
+    only the declared fields); a failure is a 400 with per-field `errors`. `schema.clean()`
+    does the same anywhere.
+  - `forms.Field(schema=..., name=..., error=...)` renders the labelled control;
+    `forms.attrs()` gives the HTML attributes for your own input.
+  - Parity is built in, not hoped for: messages are rendered once in Python; patterns are
+    rewritten to syntax `re` and `RegExp` share (`\d` becomes `[0-9]`), and a pattern that
+    can't be is refused at definition (`J115`); whole numbers beyond 2^53 are refused on both
+    sides. `tests/test_forms.py` runs 12 fields against 77 awkward values (non-ASCII digits,
+    astral characters, `"1e400"`, bools that are ints) in CPython and in the compiled bundle
+    under Node, and requires identical answers.
+- **`jongo openapi` and `jongo.openapi(app)`: an OpenAPI 3.1 document from the type hints**
+  (`jongo/schema.py`, guide §25). Every `@server` function (request body, typed result, the
+  error envelope per status), every page and route (path and query parameters), and a schema
+  for each model a function returns, in the shape `to_dict()` produces. Also served at
+  `/_jongo/openapi.json` (open in dev; an admin or the status token in production).
+  `jongo.json_schema(hint)` and `jongo.schema.function_schema / model_schema / form_schema`
+  expose the pieces. `describe()` now carries `input_schema` and `rate_limit` for each server
+  function, the app's form `schemas`, and `counts.schemas` in `check()`.
+- **An MCP server, so a coding agent can inspect and call the app** (`jongo/mcp.py`, guide
+  §26). `jongo mcp` speaks the Model Context Protocol over stdio for the app in the current
+  directory (`claude mcp add myapp -- jongo mcp`); `app.mcp(tools=[...])` mounts the same at
+  `POST /_jongo/mcp`. Tools: `jongo_context`, `jongo_describe`, `jongo_check`, `jongo_doctor`,
+  `jongo_explain`, `jongo_status`, `jongo_openapi`, `jongo_get` (render a page in-process),
+  and one per exposed `@server` function, with its input schema generated from the hints. A
+  tool call passes through the checks a browser call does (argument validation, login and
+  admin guards, rate limits) and a failure is a tool error carrying the Jongo code and hint.
+  The HTTP endpoint exists only when mounted, answers this machine only under `jongo dev`,
+  requires `Authorization: Bearer $JONGO_MCP_TOKEN` (16+ characters) in production, refuses
+  cross-site browser `Origin`s and (in dev) any `Host` that isn't this machine, which covers
+  DNS rebinding, and takes identity from `act_as=` only, never from a cookie.
+  `jongo mcp --list | --read-only | --user NAME`. `jongo doctor` checks a mounted endpoint.
+- **Rate limits** (`jongo/ratelimit.py`, guide §24). `rate_limit="5/minute"` on `@server`,
+  `@app.page` and `@app.route`: per signed-in user, else per client address; over the limit
+  the handler doesn't run and the response is 429 with `Retry-After` (`J213`).
+  `ratelimit.check(request, "3/hour", "scope", key=...)` for a custom key. A sliding window,
+  held in process memory (exact for one process; per worker with several).
+  `request.client_ip` reads `X-Forwarded-For` only under `trust_proxy=True`.
+- **Login throttling, on by default.** `authenticate(username, password, request=None)`
+  stops checking passwords after 10 wrong ones for a username in 5 minutes (and 50 per client
+  address when given the request) and raises `ratelimit.TooManyRequests` (429, `J213`).
+  Attempts are counted before the password is checked, so a burst of parallel guesses can't
+  outrun the limit; a throttled attempt does no password hashing; a correct password isn't
+  counted. Tune with `auth.LOGIN_ATTEMPTS`, `LOGIN_ATTEMPTS_PER_ADDRESS`, `LOGIN_WINDOW`
+  (`None` turns one off). The admin login shows the message.
+- **Server-side session revocation.** Every `login()` is a row in `jongo_sessions`
+  (`auth.LoginSession`, storing a SHA-256 of the session id, the address and the user agent).
+  `auth.sessions(user)`, `auth.revoke_session(id, user=...)`,
+  `auth.revoke_sessions(user, keep=request)`, `request.login_session`, and
+  `jongo sessions [--user] [--revoke ID] [--revoke-user NAME] [--json]`. `logout()` deletes the
+  row, so a copied cookie stops working.
+- **Module-qualified names compile.** `forms.validate(...)`, or `helpers.fmt(x)` after
+  `import helpers`, in a component used to be `J102` ("module isn't available in browser
+  code"); the compiler now resolves `module.name` the way it resolves an imported name.
+- Error codes `J115` (form schema can't be built), `J213` (too many requests), `J412`
+  (channel guard gave no answer), `J420`–`J422` (MCP: refused, unknown tool, malformed
+  message), `J513` (rate limit can't be read), `J514` (MCP endpoint mounted but unusable).
+- Three patterns: `14_shared_validation.py`, `15_agent_tools.py`, `16_sessions_and_limits.py`.
+  The context pack, the scaffold's `AGENTS.md` and the framework rules describe all of the above.
+
+### Changed (behaviour of existing apps)
+
+- **A channel guard must return a truthy value to allow a subscription.** Returning `None`
+  (a guard with no `return`, or a branch that falls off the end) used to allow it; now it
+  refuses with `J412`. `jongo check` reports a guard that never returns a value. Guards that
+  `return True`/`False` are unaffected.
+- **Signed-in users sign in once more after upgrading.** Cookies issued by 0.5 carry no
+  server-side session id, so they are treated as signed out. The `jongo_sessions` table is
+  created by `jongo migrate` / `jongo dev`, or on the first sign-in if neither has run.
+  Code that built a session by hand from `{"_uid", "_pw"}` should use
+  `auth.session_data_for(user)` (`TestClient.login()` already does). A signed-in request makes
+  one more query than before.
+- **`authenticate()` can raise.** Past the limit it raises a 429 `HTTPError` subclass instead
+  of returning `None`. Left uncaught in a page, route or server function it becomes the 429
+  response, which is usually what you want.
+- `jongo check --json` and `describe()` have new keys (`schemas`, `input_schema`,
+  `rate_limit`, `app.mcp`); nothing was removed.
+
+### Tests
+
+- 386 → 543 tests (`tests/test_forms.py`, `test_schema.py`, `test_mcp.py`,
+  `test_security_060.py`). The suite passes forwards, reversed and shuffled, on Python 3.10
+  to 3.14, and on PostgreSQL 16 (552 tests there).
+- Checked outside the suite: the MCP server against the official MCP Python SDK client
+  (2.3.0) over both transports, the generated documents against `openapi-spec-validator`
+  (OpenAPI 3.1), and the three new patterns in headless Chrome.
+- `test_agentic.test_describe_lists_what_the_app_declares` depended on which database the
+  previous test had configured; it now configures its own.
+
 ## 0.5.2 (2026-10-15)
 
 0.5.1 was never published to PyPI; 0.5.2 ships its fixes too (see the 0.5.1 section below).

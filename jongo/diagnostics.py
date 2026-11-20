@@ -197,6 +197,19 @@ def _app_checks(app, production: bool) -> list[dict]:
         how = "an admin session or the JONGO_STATUS_TOKEN bearer token" if token else "an admin session"
         checks.append(check_result("status_endpoint", "ok", f"/_jongo/status needs {how}"))
 
+    if getattr(app, "mcp_server", None) is not None:
+        mcp_token = (os.environ.get("JONGO_MCP_TOKEN") or "").strip()
+        exposed = len(app.mcp_server._functions())
+        what = f"{app.mcp_path} (MCP, {exposed} server function{'' if exposed == 1 else 's'} exposed)"
+        if len(mcp_token) >= 16:
+            checks.append(check_result("mcp_endpoint", "ok", f"{what} needs the JONGO_MCP_TOKEN bearer token"))
+        elif not production and app.dev and not declared_production():
+            checks.append(check_result("mcp_endpoint", "ok", f"{what} answers this machine only (dev mode)"))
+        else:
+            checks.append(check_result("mcp_endpoint", "warn",
+                                       f"{what} refuses every request: JONGO_MCP_TOKEN is "
+                                       + ("shorter than 16 characters" if mcp_token else "not set"), code="J514"))
+
     # -- code: compile + server functions ------------------------------------------------------
     try:
         app.check()

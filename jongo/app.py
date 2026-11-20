@@ -33,6 +33,8 @@ from .http import (
     redirect,
 )
 from .monitor import Monitor
+from .ratelimit import check as _check_rate
+from .ratelimit import parse as _parse_rate
 from .routing import Route, Router
 from .rpc import SERVER_FUNCTIONS, _label, coerce
 from .styles import collect_css
@@ -105,6 +107,9 @@ class Jongo:
         self.channels: list[live_module.Channel] = []
         self.layout_component = None
         self.layout_props = None
+        #: The mounted MCP endpoint (a jongo.mcp.McpServer) and its path, once app.mcp() is called.
+        self.mcp_server = None
+        self.mcp_path = None
         self._bundle: tuple[str, str] | None = None
         self._bundle_lock = threading.Lock()
         self.monitor = Monitor()
@@ -122,27 +127,40 @@ class Jongo:
 
     # -- registration ------------------------------------------------------------------
 
-    def page(self, path: str, *, title=None, layout: bool = True, name=None, login_required=False, admin_required=False):
-        """Register a page. The function returns UI (a component or elements), a Page, or a Response."""
+    def page(self, path: str, *, title=None, layout: bool = True, name=None, login_required=False,
+             admin_required=False, rate_limit=None):
+        """Register a page. The function returns UI (a component or elements), a Page, or a Response.
+
+        ``rate_limit="30/minute"`` caps how often one caller (the signed-in user, else the
+        client address) may load it; over the limit they get a 429 (``J213``).
+        """
 
         def decorator(fn):
             self.router.add(
                 Route(path, fn, methods=("GET",), kind="page", name=name, options={
                     "title": title, "layout": layout,
                     "login_required": login_required or admin_required, "admin_required": admin_required,
+                    "rate_limit": _parse_rate(rate_limit),
                 })
             )
             return fn
 
         return decorator
 
-    def route(self, path: str, *, methods=("GET",), name=None, csrf=True, login_required=False, admin_required=False):
-        """Register a plain handler. Return a Response, str (HTML), dict/list (JSON) or UI."""
+    def route(self, path: str, *, methods=("GET",), name=None, csrf=True, login_required=False,
+              admin_required=False, rate_limit=None):
+        """Register a plain handler. Return a Response, str (HTML), dict/list (JSON) or UI.
+
+        ``rate_limit="5/minute"`` caps how often one caller (the signed-in user, else the
+        client address) may call it; over the limit they get a 429 with ``Retry-After``
+        (``J213``) and the handler doesn't run. See :mod:`jongo.ratelimit`.
+        """
 
         def decorator(fn):
             self.router.add(
                 Route(path, fn, methods=methods, kind="route", name=name, options={
                     "csrf": csrf, "login_required": login_required or admin_required, "admin_required": admin_required,
+                    "rate_limit": _parse_rate(rate_limit),
                 })
             )
             return fn
@@ -158,8 +176,10 @@ class Jongo:
     def channel(self, pattern: str):
         """Declare a channel components may subscribe to with ``live()``.
 
-        The decorated function authorises each subscription: return False (or raise
-        Forbidden) to refuse it. Pattern parameters work as they do in routes::
+        The decorated function authorises each subscription: return True to allow it and
+        False (or raise Forbidden) to refuse it. Returning nothing refuses too (``J412``),
+        so a guard that forgets its ``return`` fails closed. Pattern parameters work as
+        they do in routes::
 
             @app.channel("room:<int:id>")
             def room(request, id):
@@ -275,6 +295,8 @@ class Jongo:
             raise HTTPError(401, "Please log in first", code="J208")
         if options.get("admin_required") and not getattr(request.user, "is_admin", False):
             raise HTTPError(403, "Admins only", code="J209")
+        if options.get("rate_limit") is not None:
+            _check_rate(request, options["rate_limit"], f"{route.kind} {route.path}")
         if route.kind == "page":
             return self.render_page(request, self.call_handler(route, request, params), route)
         return self.to_response(self.call_handler(route, request, params), request)
@@ -468,8 +490,11 @@ class Jongo:
 
     def http_error(self, request: Request, exc: HTTPError) -> Response:
         headers = {"Allow": ", ".join(exc.allowed)} if getattr(exc, "allowed", None) else {}
+        if getattr(exc, "retry_after", None):  # a rate limit: tell well-behaved clients when to come back
+            headers["Retry-After"] = str(exc.retry_after)
         route = getattr(request, "route", None)
-        is_status = route is not None and route.name == "_jongo_status"  # also /_jongo/status/ and //_jongo/status
+        # also /_jongo/status/ and //_jongo/status; the other machine-facing endpoints answer in JSON too
+        is_status = route is not None and route.name in ("_jongo_status", "_jongo_mcp", "_jongo_openapi")
         if request.path.startswith("/_jongo/rpc/") or is_status:
             code, hint = classify(exc)
             if request.path.startswith("/_jongo/rpc/") and code in _RPC_HINTS and not getattr(exc, "hint", None):
@@ -656,8 +681,22 @@ class Jongo:
                 )
             return json_response(status(app), headers={"Cache-Control": "no-store"})
 
+        def openapi_view(request):
+            """The OpenAPI document. Open in dev; an admin or the status token in production."""
+            from .schema import openapi
+
+            if os.environ.get("JONGO_STATUS", "").lower() in ("0", "off", "false", "no"):
+                raise NotFound()
+            if not app._status_open() and not app._status_allowed(request):
+                raise HTTPError(
+                    403, "The OpenAPI document needs a signed-in admin or the status token in production.",
+                    code="J508",
+                )
+            return json_response(openapi(app), headers={"Cache-Control": "no-store"})
+
         self.router.add(Route(f"{self.static_url}/<path:path>", static, name="static", kind="internal"))
         self.router.add(Route("/_jongo/status", status_view, name="_jongo_status", kind="internal"))
+        self.router.add(Route("/_jongo/openapi.json", openapi_view, name="_jongo_openapi", kind="internal"))
 
     def _status_open(self) -> bool:
         """/_jongo/status needs no credentials in dev mode, unless JONGO_ENV says this is production."""
@@ -684,6 +723,42 @@ class Jongo:
         from .admin import Admin
 
         return Admin(self, path, models=models, title=title)
+
+    def mcp(self, path: str = "/_jongo/mcp", *, tools=None, act_as=None):
+        """Mount an MCP endpoint, so a coding agent can inspect and call the running app.
+
+        Until this is called the app has no MCP endpoint. See :mod:`jongo.mcp` for the
+        protocol and the tools; ``jongo mcp`` serves the same thing over stdio without
+        touching the app's code.
+
+        Parameters:
+            path: where to mount it.
+            tools: which ``@server`` functions agents may call: a list of the functions,
+                ``"all"``, or ``None`` (the default) for only the read-only ``jongo_*``
+                tools (context, check, doctor, explain, status, openapi, get).
+            act_as: who a tool call runs as: a user, or ``act_as(request) -> User | None``.
+                Default: anonymous, so ``login_required`` functions refuse (``J208``).
+
+        Access: under ``jongo dev``, this machine only (as ``localhost``/``127.0.0.1``). In production,
+        ``Authorization: Bearer $JONGO_MCP_TOKEN`` (16+ characters) is required; with the
+        variable unset the endpoint refuses everyone (``J420``).
+
+        Returns:
+            The :class:`jongo.mcp.McpServer`.
+
+        Example::
+
+            app.mcp(tools=[add_todo, toggle_todo])
+            # then, in the project:  claude mcp add --transport http myapp http://127.0.0.1:8000/_jongo/mcp
+        """
+        from .mcp import McpServer
+
+        server = McpServer(self, tools=tools, act_as=act_as)
+        self.mcp_server = server
+        self.mcp_path = path
+        self.router.add(Route(path, server.http, methods=("GET", "POST", "DELETE"), name="_jongo_mcp",
+                              kind="internal", options={"csrf": False}))
+        return server
 
     # -- running ----------------------------------------------------------------------------------------
 

@@ -535,7 +535,51 @@ class FunctionTranspiler:
     def _dollar_attr(attr: str) -> bool:
         return not attr.startswith("_") and "_" in attr
 
+    def _module_member(self, node):
+        """``forms.validate`` / ``helpers.fmt``: an attribute of an imported module, resolved now.
+
+        Returns ``(True, js)`` when ``node`` is a dotted name whose base is a module the
+        function imported (other than the browser's own ``math``/``json``/...), so the
+        member is compiled like any other name; ``(False, None)`` otherwise.
+        """
+        import types
+
+        from .bundle import BROWSER_MODULES
+
+        chain = []
+        base = node
+        while isinstance(base, ast.Attribute):
+            chain.append(base.attr)
+            base = base.value
+        if not chain or not isinstance(base, ast.Name) or any(base.id in scope.locals for scope in self.scopes):
+            return False, None
+        if base.id in self.closure:
+            obj = self.closure[base.id]
+        elif base.id in self.fn.__globals__:
+            obj = self.fn.__globals__[base.id]
+        else:
+            return False, None
+        dotted = base.id
+        for attr in reversed(chain):
+            if not isinstance(obj, types.ModuleType) or obj.__name__ in BROWSER_MODULES:
+                return False, None
+            if not hasattr(obj, attr):
+                self.error(node, f"module {obj.__name__!r} has no attribute {attr!r}", code="J103",
+                           hint="check the spelling, or import the name at the top of the module")
+            obj = getattr(obj, attr)
+            dotted += "." + attr
+        if isinstance(obj, types.ModuleType):
+            return False, None  # a bare module reference: let x_Name report it
+
+        def fail(message, hint=None, code="J102"):
+            self.error(node, message, hint, code)
+
+        return True, self.resolve(dotted.replace(".", "__"), obj, fail)
+
     def x_Attribute(self, node):
+        found, js = self._module_member(node)
+        if found:
+            return js
         obj = self.expr(node.value)
         if self._dollar_attr(node.attr):
             return f"$ga({obj}, {js_string(node.attr)})"
@@ -598,7 +642,7 @@ class FunctionTranspiler:
                                f"{k.arg}= isn't an event handler, so this function would never be called",
                                f"write on_{event}= instead of {k.arg}=", "J114")
         args, kw = self.call_args(node)
-        if isinstance(func, ast.Attribute):
+        if isinstance(func, ast.Attribute) and not self._module_member(func)[0]:
             obj = self.expr(func.value)
             tail = f", {kw}" if kw else ""
             return f"$m({obj}, {js_string(func.attr)}, [{', '.join(args)}]{tail})"

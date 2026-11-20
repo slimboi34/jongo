@@ -7,7 +7,7 @@ it holds state like any single-page app. From the browser you call a server func
 plain `await`.
 
 This guide is the long version. The [README](../README.md) is the short one, and
-[examples/patterns](../examples/patterns/) has thirteen runnable apps.
+[examples/patterns](../examples/patterns/) has sixteen runnable apps.
 
 - [1. Install and first app](#1-install-and-first-app)
 - [2. The mental model](#2-the-mental-model)
@@ -31,6 +31,10 @@ This guide is the long version. The [README](../README.md) is the short one, and
 - [20. Working with AI coding agents](#20-working-with-ai-coding-agents)
 - [21. Diagnostics: doctor, explain, status](#21-diagnostics-doctor-explain-status)
 - [22. Error codes](#22-error-codes)
+- [23. Form schemas: one set of rules for the browser and the server](#23-form-schemas-one-set-of-rules-for-the-browser-and-the-server)
+- [24. Rate limits and revocable sessions](#24-rate-limits-and-revocable-sessions)
+- [25. OpenAPI and JSON Schema](#25-openapi-and-json-schema)
+- [26. MCP: the app as tools for a coding agent](#26-mcp-the-app-as-tools-for-a-coding-agent)
 
 ---
 
@@ -269,6 +273,9 @@ async def submit(event):
 > **Gotcha.** Pass `lambda v: total.set(v)`, not the bare method `total.set`, as a callback
 > to another component — a bare method loses its receiver when it crosses into JavaScript.
 
+To validate a form, declare its rules once with `forms.Schema` and run them in the browser
+and on the server: see [§23](#23-form-schemas-one-set-of-rules-for-the-browser-and-the-server).
+
 A classic HTML form (no JavaScript) posts to a route and needs the CSRF token as a hidden
 input:
 
@@ -493,7 +500,7 @@ JONGO_TEST_DATABASE=postgres://localhost/jongo_test python -m pytest
 ```python
 @app.channel("room:<int:id>")
 def room(request, id):
-    return id in request.session.get("rooms", [])     # False or Forbidden refuses
+    return id in request.session.get("rooms", [])     # True allows; anything else refuses
 
 
 @server
@@ -512,6 +519,10 @@ def Chat(room):
 
 - A channel that is not declared cannot be subscribed to — the rule that keeps undecorated
   functions off the RPC boundary, applied to data going the other way.
+- The guard has to say yes. Only a truthy return value allows the subscription; `False`
+  refuses it (`J410`) and so does returning nothing (`J412`), so a guard with a forgotten
+  `return` fails closed. `jongo check` reports a guard that never returns a value. (Before
+  0.6.0, returning `None` allowed.)
 - `live()` follows the component: it subscribes on mount, moves when the channel changes,
   and unsubscribes on unmount. One SSE connection per tab carries every channel the page
   asked for, and reconnects with backoff.
@@ -545,6 +556,10 @@ Sessions are HMAC-signed cookies: `request.session["cart"] = [...]`. Passwords a
 PBKDF2-SHA256, salted and compared in constant time; changing one signs out that user's
 other sessions.
 
+Every sign-in is also recorded on the server, so it can be listed and revoked, and
+`authenticate()` throttles wrong passwords on its own:
+see [§24](#24-rate-limits-and-revocable-sessions).
+
 `app.admin()` generates an admin site at `/admin` — list, search, sort, create, edit and
 delete for every model, with forms built from your field types. Create the first account
 with `jongo createadmin`.
@@ -562,7 +577,13 @@ What Jongo does by default:
   your code runs. Only decorated functions are exposed. The same applies to channels.
 - **CSRF.** Every state-changing call carries a token signed with your secret and bound to
   the origin. Cross-origin `Origin` headers are rejected.
-- **Sessions** are signed; **passwords** are PBKDF2-SHA256.
+- **Sessions** are signed and revocable: each sign-in is a row on the server, and a cookie
+  whose row is gone is refused. **Passwords** are PBKDF2-SHA256.
+- **Password guessing is throttled.** `authenticate()` stops checking after 10 wrong
+  passwords for one username in 5 minutes and answers 429. `rate_limit=` puts the same cap
+  on any server function, page or route ([§24](#24-rate-limits-and-revocable-sessions)).
+- **Channel guards fail closed.** A guard that returns nothing refuses the subscription.
+- **Form input is whitelisted.** A `forms.Schema` returns only the fields it declares.
 - **Limits.** Request bodies are capped; a bogus `Content-Length` is rejected before the
   body is read.
 - **`to_dict()`** never includes password hashes.
@@ -584,6 +605,7 @@ client.get("/")                       # a real WSGI round trip
 client.post("/login", data={...})     # CSRF handled like a browser
 client.rpc(add_todo, "Write tests")   # call a @server function over HTTP
 client.navigate("/")                  # the JSON tree the in-browser router fetches
+client.login(user)                    # sign in (records the session, as auth.login does)
 response, chunks = client.stream("/_jongo/live?channels=prices")   # SSE, unconsumed
 ```
 
@@ -608,6 +630,9 @@ See [12_testing.py](../examples/patterns/12_testing.py) for the whole set in one
 | `jongo doctor [--json] [--production] [--port N]` | one health report on the app, the database and the settings; exit 1 on a failure — see [§21](#21-diagnostics-doctor-explain-status) |
 | `jongo explain CODE` / `--list [--json]` | what an error code means and how to fix it — see [§22](#22-error-codes) |
 | `jongo status [--url URL] [--json]` | what a running server is doing: recent requests, errors, routes, channels, N+1 queries |
+| `jongo openapi [-o FILE] [--api-version V] [--server URL]` | the OpenAPI 3.1 document, generated from the type hints — see [§25](#25-openapi-and-json-schema) |
+| `jongo mcp [--list] [--read-only] [--user NAME]` | serve the app to a coding agent over MCP on stdin/stdout — see [§26](#26-mcp-the-app-as-tools-for-a-coding-agent) |
+| `jongo sessions [--user NAME] [--revoke ID] [--revoke-user NAME] [--json]` | list the active sign-ins, or revoke them — see [§24](#24-rate-limits-and-revocable-sessions) |
 
 ---
 
@@ -633,6 +658,14 @@ JONGO_SECRET_KEY=... python -m gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
   `.jongo/secret` (a fresh container gets a new one), and about pending migrations and cookie settings.
 - To read `/_jongo/status` from a deployed server, set `JONGO_STATUS_TOKEN` (16+ characters)
   and run `jongo status --url https://… --token …`; otherwise only a signed-in admin can.
+
+- Rate limits and the login throttle count in the memory of each process. With one worker
+  they are exact; with several, each worker counts separately.
+- If the app calls `app.mcp()`, set `JONGO_MCP_TOKEN` (16+ characters) or the endpoint
+  refuses everyone; `jongo doctor --production` warns about it (`J514`).
+- Upgrading from 0.5: users sign in once more (their old cookies carry no server-side
+  session), and the `jongo_sessions` table is created on the first sign-in if
+  `jongo migrate` hasn't already made it.
 
 [13_deployment.py](../examples/patterns/13_deployment.py) is this section as a file.
 
@@ -728,6 +761,12 @@ syntax. Both say the same three things: run `jongo context` before you start, ru
 
 From Python, `jongo.describe(app)` returns the map as a dict and `jongo.context(app)` the
 Markdown; both are what the commands print.
+
+**The app is a set of tools.** `jongo mcp` serves all of the above to an agent as MCP tools,
+together with one tool per `@server` function, so the agent can call the app it is working on
+instead of guessing at it ([§26](#26-mcp-the-app-as-tools-for-a-coding-agent)). The same type
+hints produce an OpenAPI document for everything else that speaks HTTP
+([§25](#25-openapi-and-json-schema)).
 
 ---
 
@@ -837,6 +876,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J112` | Invalid UI element | Return elements (div(...), components) from pages and components; put event handlers inside a @component. |
 | `J113` | Unknown component | Reload the page; define components at module level so they register at import. |
 | `J114` | Event handler passed under the wrong name | Rename the keyword to on_<event>: onClick= becomes on_click=, onInput= becomes on_input=. |
+| `J115` | Form schema can't be built | Fix the rule named in the message; write patterns with plain groups and character classes ([A-Za-z] instead of (?i)). |
 
 **Routing and HTTP**
 
@@ -855,6 +895,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J210` | Forbidden | Check the permission condition that raised it; this is usually the app working as intended. |
 | `J211` | Query parameter has the wrong type | Fix the link or form that builds the URL, or give the parameter a type that accepts the value (str, Optional[int]) and handle it in the function. |
 | `J212` | Malformed request body | Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for larger uploads raise jongo.Request.max_body_size (16 MB by default). |
+| `J213` | Too many requests (rate limit) | Wait for the Retry-After seconds. If the limit is too tight, raise it where it is set (rate_limit="30/minute", or jongo.auth.LOGIN_ATTEMPTS / LOGIN_WINDOW for sign-in). |
 
 **Database, models and migrations**
 
@@ -886,6 +927,10 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J408` | Server function returned an unsupported response | Return JSON-able data, or redirect(url). |
 | `J410` | Channel subscription refused | Declare the channel with @app.channel('pattern') and check its guard. |
 | `J411` | Model argument names a row that doesn't exist | Check the id the browser sends (the row may have been deleted); handle the 404 in the browser. |
+| `J412` | Channel guard gave no answer | Return True to allow the subscription and False to refuse it, on every path through the guard. |
+| `J420` | MCP endpoint refused the request | Set JONGO_MCP_TOKEN on the server and give the same token to the MCP client as a bearer token; locally, use `jongo mcp` (stdio) or connect to 127.0.0.1. |
+| `J421` | Unknown MCP tool | Call tools/list to see the tools; expose a function with app.mcp(tools=[fn]) or tools="all". |
+| `J422` | Malformed MCP message | Send one JSON-RPC object per request (or per line over stdio) with "jsonrpc": "2.0", a method and object params. |
 
 **Configuration, CLI and deployment**
 
@@ -903,3 +948,372 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J510` | Admin mounted but no admin user | Run `jongo createadmin`. |
 | `J511` | Unsupported Python version | Install a newer Python and recreate the virtualenv. |
 | `J512` | Can't reach the running server | Start the app (`jongo dev`) and pass its address: jongo status --url http://127.0.0.1:8000 |
+| `J513` | Rate limit can't be read | Write it as "5/minute", "100/hour", "10 per 30 seconds", or a (count, seconds) pair. |
+| `J514` | MCP endpoint mounted but nobody can use it | Set JONGO_MCP_TOKEN to a long random value (python -c "import secrets; print(secrets.token_urlsafe(32))"), or remove app.mcp() from the production app. |
+
+---
+
+## 23. Form schemas: one set of rules for the browser and the server
+
+Validation usually exists twice: once in JavaScript so the user gets an answer straight
+away, once on the server because the browser can't be trusted. The two copies drift. In
+Jongo there is one copy, because the browser runs compiled Python.
+
+```python
+from jongo import forms
+
+Signup = forms.Schema(
+    "Signup",
+    email=forms.Email(max_length=120),
+    team=forms.Text(min_length=2, max_length=30, pattern=r"[a-z][a-z0-9-]*"),
+    plan=forms.Choice([("free", "Free"), ("team", "Team")], default="free"),
+    seats=forms.Int(min=1, max=50, default=1),
+    password=forms.Text(min_length=8, secret=True),
+    confirm=forms.Text(same_as="password", secret=True, label="Password again"),
+    terms=forms.Bool(required=True, label="I accept the terms"),
+)
+
+
+@server
+def sign_up(request, data: Signup) -> dict:      # validated before this line runs
+    if Account.filter(email__iexact=data["email"]).exists():
+        raise db.ValidationError({"email": "That address already has an account."})
+    return Account.create(email=data["email"], team=data["team"], seats=data["seats"]).to_dict()
+
+
+@component
+def SignupForm():
+    errors = state({})
+
+    async def submit(event):
+        values = form_values(event)
+        found = forms.validate(Signup, values)   # in the browser: no request made
+        errors.set(found)
+        if found:
+            return
+        try:
+            await sign_up(values)                # on the server: the same rules again
+        except ServerError as exc:
+            errors.set(exc.errors or {})         # plus what only the server knows
+
+    return form([forms.Field(schema=Signup, name=name, error=errors.value.get(name), key=name)
+                 for name in Signup],
+                button("Create account"), on_submit=submit)
+```
+
+**Rules.** Each takes `required` (default `True`), `label`, `default`, `help` and `messages`.
+
+| Rule | Checks | Cleaned value |
+|---|---|---|
+| `forms.Text(min_length, max_length, pattern, same_as, strip, multiline, secret)` | length in characters, a whole-value regular expression, equality with another field | `str`, stripped |
+| `forms.Email(max_length=254)` | looks like `name@host.tld` | `str` |
+| `forms.Int(min, max)` | a whole number, as a number or as text (`"42"`) | `int` |
+| `forms.Float(min, max)` | a number (`"3.5"`, `"1e3"`) | `float` |
+| `forms.Bool()` | yes/no; `required=True` means it must be ticked | `bool` |
+| `forms.Choice(choices)` | one of the values, or of `(value, label)` pairs | the declared value |
+
+`forms.Schema.from_model(Invite, only=..., exclude=...)` builds a schema from a model's
+fields (`max_length`, `choices`, `blank`, the type), so the form can't drift from the table.
+
+**Using a schema.**
+
+| Where | Call | Result |
+|---|---|---|
+| a component | `forms.validate(Signup, values)` | `{field: message}`; empty when valid |
+| a component, one field | `forms.check(Signup["email"], value, values)` | the message, or `""` |
+| a `@server` parameter | `data: Signup` | the cleaned dict; a failure is a 400 with `errors` (`J304`) |
+| anywhere on the server | `Signup.clean(values)` or `Signup(values)` | the cleaned dict, or raises `db.ValidationError` |
+| rendering | `forms.Field(schema=Signup, name="email", value=..., error=..., on_input=...)` | a labelled control with its message |
+| rendering your own input | `input_(**forms.attrs(Signup, "email"))` | `name`, `type`, `required`, `maxlength`, `min`, `max`… |
+
+`clean()` returns **only the fields the schema declares**, typed and stripped, with defaults
+applied. A browser that adds `"is_admin": true` to the payload gets it dropped, so
+`Model.create(**data)` is safe to write. A field with a `default` is never "required":
+left empty, it becomes the default.
+
+`forms.Field` renders `<label class="jongo-field">` with the control, `help` text and, when
+`error` is set, `<span class="jongo-field-error" role="alert">`. It is unstyled; style the
+classes with `global_css`. Pass `novalidate=True` on the `<form>` if you want your own
+messages instead of the browser's native bubbles.
+
+**How the two sides are kept in step.**
+
+- A schema is a plain dict of rules, so the compiler inlines it into the bundle as JSON.
+  `forms.validate` and `forms.check` are ordinary Python functions that the compiler turns
+  into JavaScript: the browser runs the code the server runs.
+- Every message is rendered in Python when the schema is built. The browser formats nothing,
+  so `5.0` never prints differently on the two sides.
+- Patterns are rewritten to syntax Python's `re` and JavaScript's `RegExp` read identically:
+  `\d` becomes `[0-9]`, `\w` becomes `[A-Za-z0-9_]`, `.` stops at the same line endings. A
+  pattern that can't be made portable (named groups, `(?i)`, `\A`, possessive quantifiers) is
+  an error when the schema is defined (`J115`), not a surprise in production.
+- Whole numbers beyond ±9007199254740991 are refused on both sides, rather than silently
+  rounded by JavaScript.
+- `tests/test_forms.py` runs every rule against a table of awkward values (non-ASCII
+  digits, astral characters, `"1e400"`, bools that are ints) in CPython and in the compiled
+  bundle under Node, and requires identical answers.
+
+Limits: a schema validates flat fields (no nested objects or lists), `DateTime`/`Date`/`JSON`
+model fields are skipped by `from_model`, and HTML's `maxlength` counts UTF-16 units while
+the schema counts characters, so for emoji the browser's native limit is the stricter one.
+
+[14_shared_validation.py](../examples/patterns/14_shared_validation.py) is this section as a
+running app, with as-you-leave-the-field feedback.
+
+---
+
+## 24. Rate limits and revocable sessions
+
+### Rate limits
+
+```python
+@server(rate_limit="5/minute")
+def send_invite(request, email: str) -> dict: ...
+
+@app.route("/webhook", methods=("POST",), csrf=False, rate_limit="30/minute")
+def webhook(request): ...
+
+@app.page("/report", rate_limit="10 per 30 seconds")
+def report(): ...
+```
+
+The caller is the signed-in user when there is one, and the client address otherwise. Over
+the limit the function doesn't run: the response is `429` with a `Retry-After` header and
+the code `J213`. Rates are written `"5/minute"`, `"100/hour"`, `"3/s"`, `"10 per 30 seconds"`
+or as a `(count, seconds)` pair; a rate that can't be read fails when the function is
+registered (`J513`), not on the first request. The window slides, so a burst can't straddle a
+boundary and get through twice.
+
+For a limit keyed by something else, call it yourself:
+
+```python
+from jongo import ratelimit
+
+@server
+def reset_password(request, email: str) -> dict:
+    ratelimit.check(request, "3/hour", "reset-password", key=email.lower())
+    ...
+```
+
+Behind a proxy, addresses are only meaningful with `Jongo(trust_proxy=True)`: then
+`request.client_ip` is the entry the proxy appended to `X-Forwarded-For`. Without it the
+header is ignored, so a client can't choose its own rate-limit key.
+
+**Counters live in the memory of the process.** `jongo run` is one process, so its limits
+are exact. Behind several worker processes each worker counts on its own (the effective
+limit is workers × limit), and a restart clears them. A limit that must hold across
+processes needs a shared store, which Jongo doesn't provide.
+
+### Login throttling
+
+`authenticate(username, password, request)` counts wrong passwords with no configuration:
+
+```python
+try:
+    user = authenticate(username, password, request)
+except TooManyRequests as exc:        # from jongo.ratelimit; a 429, code J213
+    return {"error": exc.message, "retry_after": exc.retry_after}
+```
+
+After 10 wrong passwords for one username in 5 minutes it stops checking passwords for that
+username and raises instead, so a guess gains nothing and costs the server no hashing. A
+correct password clears the count. When you pass the request, wrong passwords are also
+counted per client address (50 in 5 minutes), which stops one machine trying a few passwords
+on many accounts. If the exception isn't caught it becomes the 429 response. Unknown
+usernames are throttled the same way, so the limit doesn't reveal which accounts exist.
+Tune with `auth.LOGIN_ATTEMPTS`, `auth.LOGIN_ATTEMPTS_PER_ADDRESS` and `auth.LOGIN_WINDOW`;
+`None` turns one off. The trade-off is the usual one: someone who knows a username can lock
+its login for five minutes.
+
+### Sessions you can revoke
+
+A signed cookie can't be taken back: before 0.6.0, signing out cleared the cookie in that
+browser, and a copy of it kept working until it expired. Now every `login()` is a row in
+`jongo_sessions`, and a cookie is honoured only while its row exists.
+
+```python
+from jongo import auth
+
+auth.sessions(user)                          # [LoginSession, ...] newest first
+auth.revoke_session(session_id, user=user)   # sign one browser out -> True/False
+auth.revoke_sessions(user)                   # sign out everywhere -> how many
+auth.revoke_sessions(user, keep=request)     # everywhere but this browser
+request.login_session                        # this request's own record
+```
+
+A session has `id`, `created`, `last_seen`, `ip` and `user_agent`; `to_dict()` gives them
+JSON-ready, enough for a "where you're signed in" list. Pass `user=request.user` to
+`revoke_session` whenever the id came from the browser, so nobody can end someone else's
+session by counting upwards. From the command line:
+
+```bash
+jongo sessions [--user ann] [--json]
+jongo sessions --revoke 12
+jongo sessions --revoke-user ann
+```
+
+What to know:
+
+- `logout()` deletes the row, so a copied cookie dies with it. Changing a password still
+  signs out that user's other sessions, as before.
+- The table stores a SHA-256 of the session id, never the id, and `to_dict()` leaves it out.
+- A row expires with `session_max_age` (14 days by default), counted from the sign-in.
+- It costs one extra query per request from a signed-in user. `last_seen` is written at
+  most once every five minutes.
+- **Upgrading:** cookies issued by 0.5 carry no session id, so those users are signed out
+  once and sign in again. The table is created on the first sign-in if `jongo migrate`
+  hasn't run. Code that built a session cookie by hand from `{"_uid": ..., "_pw": ...}`
+  should call `auth.session_data_for(user)`; `TestClient.login(user)` already does.
+
+[16_sessions_and_limits.py](../examples/patterns/16_sessions_and_limits.py) is a working
+"where you're signed in" page.
+
+---
+
+## 25. OpenAPI and JSON Schema
+
+There is no API description to write: the type hints on `@server` functions and the fields on
+models already are one. `jongo openapi` writes them out as an OpenAPI 3.1 document.
+
+```bash
+jongo openapi                                   # to stdout
+jongo openapi -o openapi.json --api-version 1.2.0 --server https://example.com
+curl http://127.0.0.1:8000/_jongo/openapi.json  # from the running app
+```
+
+The document has:
+
+- every `@server` function as `POST /_jongo/rpc/<id>`, with the body browser code sends
+  (`{"args": [...], "kwargs": {...}}`), the result under `ok`, and the error envelope for
+  each status it can answer (400 for bad arguments, 401/403 for the guards, 404 for a model
+  argument, 429 for a rate limit);
+- every page and route with its path parameters (from `<int:id>`) and query parameters
+  (from the handler's signature), and the response schema when the handler declares a
+  return type;
+- a schema under `components` for each model a function returns, in the shape `to_dict()`
+  produces (so `User` has no `password`), and one `Error` schema;
+- `x-jongo` on each operation: `login_required`, `admin_required`, `rate_limit`.
+
+The framework's own routes and the admin are left out. `/_jongo/openapi.json` is open under
+`jongo dev`; in production it follows the rule of `/_jongo/status` (an admin session or
+`JONGO_STATUS_TOKEN`).
+
+From Python:
+
+```python
+from jongo import json_schema, openapi
+from jongo.schema import form_schema, function_schema, model_schema
+
+openapi(app, version="1.2.0")        # the document as a dict
+json_schema(list[int] | None)        # {"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}]}
+json_schema(Todo)                    # an argument: {"type": "integer", "description": "id of a Todo"}
+json_schema(Todo, output=True)       # a return value: the to_dict() object
+function_schema(add_todo)            # a server function's arguments as one object
+form_schema(Signup)                  # a forms.Schema
+```
+
+How hints map: `int`, `float`, `str`, `bool`, `None`; `list[T]`, `set[T]`, `tuple[A, B]`,
+`dict[str, T]`; `Optional[T]` and unions as `anyOf`; `Literal[...]` as `enum`; dataclasses as
+objects; `datetime`, `date`, `UUID`, `Decimal`; a model class as its id going in and its
+`to_dict()` object coming out; a `forms.Schema` as an object with its rules as keywords
+(`minLength`, `maximum`, `pattern`, `enum`, `format: email`). An unannotated parameter is
+`{}`: anything. `jongo.describe(app)` carries the same `input_schema` for each server function.
+
+A return type is documentation, not enforcement: Jongo validates arguments, and reports what
+you declared for results. Annotate what a function really returns.
+
+---
+
+## 26. MCP: the app as tools for a coding agent
+
+The [Model Context Protocol](https://modelcontextprotocol.io) is how agents such as Claude
+Code discover tools and call them. A Jongo app already has what a tool list needs: named
+functions with docstrings and type hints, and reports that answer in JSON.
+
+**In the project, over stdio.** Nothing to add to the app:
+
+```bash
+jongo mcp                              # speaks MCP on stdin/stdout
+claude mcp add myapp -- jongo mcp      # register it with Claude Code
+jongo mcp --list                       # print the tools as JSON and exit
+jongo mcp --read-only                  # only the jongo_* tools
+jongo mcp --user ann                   # run calls as this user
+```
+
+**From the running server, over HTTP.** Opt in, in `app.py`:
+
+```python
+app.mcp()                                              # POST /_jongo/mcp: the jongo_* tools
+app.mcp(tools=[add_task, list_tasks, complete_task])   # ...plus these functions
+app.mcp(tools="all", act_as=lambda request: User.get(username="agent"))
+```
+
+```bash
+claude mcp add --transport http myapp http://127.0.0.1:8000/_jongo/mcp
+```
+
+**The tools.**
+
+| Tool | Returns |
+|---|---|
+| `jongo_context` | the framework's rules and this app's map, as Markdown (`jongo context`) |
+| `jongo_describe` | the map as data; `section` picks one part (`jongo context --json`) |
+| `jongo_check` | compile, resolve hints, check channel guards, plan migrations (`jongo check --json`) |
+| `jongo_doctor` | the health report; `production=true` judges it as a deploy |
+| `jongo_explain` | what an error code means and how to fix it; with no code, every code |
+| `jongo_status` | recent requests, errors with tracebacks, per-route counters, N+1 queries |
+| `jongo_openapi` | the OpenAPI document |
+| `jongo_get` | GET a path in-process: `{status, content_type, body}`, to confirm a page renders |
+| *one per `@server` function* | the function's result; its input schema comes from the type hints |
+
+The context pack and the OpenAPI document are also MCP resources (`jongo://context`,
+`jongo://openapi`).
+
+A tool call goes through the door a browser call goes through: arguments are checked against
+the type hints (a model parameter takes the row's id, a `forms.Schema` parameter is
+validated), `login_required` and `admin_required` are enforced, rate limits are counted. A
+call that fails comes back as a tool error, not a traceback:
+
+```json
+{"isError": true,
+ "content": [{"type": "text", "text": "[J403] argument 'title' must be str, got int\nhint: send title as str ..."}],
+ "structuredContent": {"error": {"code": "J403", "type": "HTTPError", "status": 400,
+                                 "message": "argument 'title' must be str, got int",
+                                 "hint": "...", "explain": "jongo explain J403"}}}
+```
+
+so the agent can read the code, call `jongo_explain`, and try again.
+
+**Which functions are exposed.** `jongo mcp` runs on your machine as you, and exposes every
+`@server` function the app defines. `app.mcp()` exposes only the functions you pass;
+`tools="all"` is there, and it is a decision: everything the browser can call, an agent
+holding the token can call.
+
+**Who a call runs as.** Anonymous by default, so `login_required` functions answer `J208`.
+`act_as` (a user, or a function of the request) or `jongo mcp --user NAME` chooses a user.
+Over HTTP a browser session cookie gives no identity: the endpoint is exempt from the CSRF
+check, so cookies carry no authority there.
+
+**Who may connect over HTTP.**
+
+- There is no endpoint until `app.mcp()` is called.
+- Under `jongo dev` it answers this machine only, addressed as `localhost` or `127.0.0.1`,
+  even if the server is bound to `0.0.0.0`.
+- In production it requires `Authorization: Bearer $JONGO_MCP_TOKEN`, 16 characters or more.
+  With the variable unset it refuses everyone (`J420`), and `jongo doctor` says so (`J514`).
+- A request with a browser `Origin` from another site is refused unless it carries the
+  token, and so (in dev) is one whose `Host` isn't this machine. Together they stop a web
+  page you visit from reaching a server on localhost, directly or by DNS rebinding.
+
+In production, tool errors from your own code say `Server error` and the code, as a browser
+would be told; the traceback goes to the log and `jongo status`.
+
+**The transport.** Stdio is one JSON message per line; whatever the app prints goes to
+stderr, so `print()` in app code can't corrupt the stream. HTTP is MCP's Streamable HTTP in
+its simplest form: one JSON-RPC message per POST, one JSON response; the server pushes
+nothing, so there are no sessions and no streams to hold open (a GET answers 405). The
+server answers protocol revisions 2024-11-05 to 2025-11-25, and offers tools and resources
+(no prompts, no sampling, no batches).
+
+[15_agent_tools.py](../examples/patterns/15_agent_tools.py) mounts the endpoint and shows the
+tool list an agent sees.

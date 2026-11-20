@@ -261,6 +261,17 @@ CATALOGUE: dict[str, dict] = {
         "Rename the keyword to on_<event>: onClick= becomes on_click=, onInput= becomes on_input=.",
         "button('Save', onClick=save)   # J114: use on_click=save",
     ),
+    "J115": _e(
+        "Form schema can't be built",
+        "A forms.Schema (or one of its rules) is contradictory or not portable: a pattern that uses syntax "
+        "only Python or only JavaScript understands (named groups, inline flags like (?i), \\A/\\Z, possessive "
+        "quantifiers, \\D inside [...]), bounds the wrong way round, a default that fails the field's own "
+        "rules, or a same_as that names a missing field. It is raised when the schema is defined, because "
+        "the same rules must run on the server and, compiled, in the browser.",
+        "Fix the rule named in the message; write patterns with plain groups and character classes ([A-Za-z] instead of (?i)).",
+        "forms.Text(pattern=r\"(?i)[a-z]+\")      # J115: inline flags aren't shared\n"
+        "forms.Text(pattern=r\"[A-Za-z]+\")       # the portable spelling",
+    ),
     # -- J2xx routing and HTTP --------------------------------------------------------------
     "J200": _e(
         "HTTP error raised by the app",
@@ -337,6 +348,16 @@ CATALOGUE: dict[str, dict] = {
         "Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for "
         "larger uploads raise jongo.Request.max_body_size (16 MB by default).",
     ),
+    "J213": _e(
+        "Too many requests (rate limit)",
+        "The caller is over a rate limit: one set with rate_limit= on a @server function, page or route, a "
+        "ratelimit.check() call, or the built-in throttle on wrong passwords in authenticate(). The response "
+        "is a 429 with a Retry-After header; the handler did not run. Counters are per process and are cleared "
+        "by a restart.",
+        "Wait for the Retry-After seconds. If the limit is too tight, raise it where it is set "
+        "(rate_limit=\"30/minute\", or jongo.auth.LOGIN_ATTEMPTS / LOGIN_WINDOW for sign-in).",
+        "@server(rate_limit=\"5/minute\")\ndef send_invite(request, email: str) -> dict: ...",
+    ),
     # -- J3xx database ------------------------------------------------------------------------
     "J300": _e(
         "Database error",
@@ -365,7 +386,8 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J304": _e(
         "Validation failed",
-        "A model's field validation (or the app's own db.ValidationError) rejected the data. `.errors` "
+        "A model's field validation, a forms.Schema (a @server parameter annotated with one, or "
+        "schema.clean()), or the app's own db.ValidationError rejected the data. `.errors` "
         "maps field names to messages; server calls return them to the browser with status 400.",
         "Show err.errors to the user, or fix the data being saved.",
     ),
@@ -451,7 +473,7 @@ CATALOGUE: dict[str, dict] = {
     "J410": _e(
         "Channel subscription refused",
         "The page asked to subscribe to a channel that isn't declared with @app.channel, has an invalid "
-        "name, or whose guard returned False.",
+        "name, or whose guard returned a falsy value. (A guard that returned nothing at all is J412.)",
         "Declare the channel with @app.channel('pattern') and check its guard.",
     ),
     "J411": _e(
@@ -459,6 +481,37 @@ CATALOGUE: dict[str, dict] = {
         "A server function parameter annotated with a model class receives the row for the id the browser "
         "sent; there is no row with that id.",
         "Check the id the browser sends (the row may have been deleted); handle the 404 in the browser.",
+    ),
+    "J412": _e(
+        "Channel guard gave no answer",
+        "The function under @app.channel decides who may subscribe, and it returned None: it has no "
+        "`return`, or one of its branches falls off the end. Before 0.6.0 that counted as permission; "
+        "now only a truthy value allows a subscription, so a guard with a forgotten return fails closed. "
+        "`jongo check` reports a guard that can never return a value before anyone subscribes.",
+        "Return True to allow the subscription and False to refuse it, on every path through the guard.",
+        "@app.channel(\"prices\")\ndef prices(request):\n    return True          # was: pass",
+    ),
+    "J420": _e(
+        "MCP endpoint refused the request",
+        "The MCP endpoint mounted with app.mcp() answers this machine only under `jongo dev` (reached as "
+        "localhost or 127.0.0.1). In production it "
+        "requires Authorization: Bearer $JONGO_MCP_TOKEN (at least 16 characters), and with that variable "
+        "unset it refuses everyone. A request with a browser Origin from another site is always refused.",
+        "Set JONGO_MCP_TOKEN on the server and give the same token to the MCP client as a bearer token; "
+        "locally, use `jongo mcp` (stdio) or connect to 127.0.0.1.",
+    ),
+    "J421": _e(
+        "Unknown MCP tool",
+        "An MCP client called a tool this server doesn't offer. The jongo_* tools are always there; the app's "
+        "own @server functions are tools only when exposed (all of them under `jongo mcp`, the ones passed to "
+        "app.mcp(tools=...) over HTTP).",
+        "Call tools/list to see the tools; expose a function with app.mcp(tools=[fn]) or tools=\"all\".",
+    ),
+    "J422": _e(
+        "Malformed MCP message",
+        "The message isn't a JSON-RPC 2.0 request the MCP server understands: invalid JSON, a batch, params or "
+        "arguments that aren't an object, or a tool argument outside what the tool accepts.",
+        "Send one JSON-RPC object per request (or per line over stdio) with \"jsonrpc\": \"2.0\", a method and object params.",
     ),
     # -- J5xx configuration, CLI and deployment -----------------------------------------------
     "J501": _e(
@@ -525,6 +578,19 @@ CATALOGUE: dict[str, dict] = {
         "Can't reach the running server",
         "`jongo status` couldn't connect to the URL — the server isn't running there, or it isn't a Jongo app.",
         "Start the app (`jongo dev`) and pass its address: jongo status --url http://127.0.0.1:8000",
+    ),
+    "J513": _e(
+        "Rate limit can't be read",
+        "A rate_limit= value isn't a rate Jongo understands. It is checked when the function or route is "
+        "registered, so the app fails at start rather than running without the limit.",
+        "Write it as \"5/minute\", \"100/hour\", \"10 per 30 seconds\", or a (count, seconds) pair.",
+    ),
+    "J514": _e(
+        "MCP endpoint mounted but nobody can use it",
+        "app.mcp() mounts an endpoint that, in production, only accepts Authorization: Bearer $JONGO_MCP_TOKEN. "
+        "The variable is unset or shorter than 16 characters, so every request is refused (J420).",
+        "Set JONGO_MCP_TOKEN to a long random value (python -c \"import secrets; print(secrets.token_urlsafe(32))\"), "
+        "or remove app.mcp() from the production app.",
     ),
 }
 

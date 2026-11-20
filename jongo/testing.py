@@ -162,6 +162,7 @@ class TestClient:
         return data.get("redirect") and {"redirect": data["redirect"]} or data.get("ok")
 
     def login(self, user) -> None:
+        """Sign ``user`` in on this client (records the sign-in, as ``auth.login`` does)."""
         from .auth import session_data_for
 
         self.cookies[SESSION_COOKIE] = self.app.signer.dumps(session_data_for(user))

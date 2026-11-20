@@ -118,6 +118,8 @@ class Request:
         self.path_params: dict = {}
         self.session: Session = Session()
         self._user = _UNSET
+        #: The server-side record of this sign-in (jongo.auth.LoginSession), once request.user is loaded.
+        self.login_session = None
         self.route = None
         self._body: bytes | None = None
         self._form: QueryDict | None = None
@@ -173,6 +175,23 @@ class Request:
     @property
     def remote_addr(self) -> str:
         return self.environ.get("REMOTE_ADDR", "")
+
+    @property
+    def client_ip(self) -> str:
+        """The caller's address, for rate limits and the session list.
+
+        ``REMOTE_ADDR`` unless the app was created with ``trust_proxy=True``, in which case
+        it is the last entry of ``X-Forwarded-For``: the one the trusted proxy itself
+        appended. Earlier entries are whatever the client chose to send, so they are never
+        used. Without ``trust_proxy`` the header is ignored entirely.
+        """
+        if getattr(self.app, "trust_proxy", False):
+            forwarded = self.headers.get("x-forwarded-for")
+            if forwarded:
+                last = forwarded.split(",")[-1].strip()
+                if last:
+                    return last[:64]
+        return self.remote_addr
 
     @property
     def is_navigation(self) -> bool:

@@ -978,6 +978,18 @@ function $m(o, name, args, kw) {
 
 // ---- stdlib modules available in browser code -------------------------------------------
 
+// jongo.forms.matches(pattern, text): the whole value must match, as re.fullmatch does.
+// Patterns arrive already rewritten to the syntax Python and JavaScript share.
+const $patterns = new Map();
+function $matches(pattern, text) {
+  let re = $patterns.get(pattern);
+  if (re === undefined) {
+    re = new RegExp("^(?:" + pattern + ")$", "u");
+    $patterns.set(pattern, re);
+  }
+  return typeof text === "string" && re.test(text);
+}
+
 const $modules = {
   math: {
     pi: Math.PI, e: Math.E, tau: 2 * Math.PI, inf: Infinity, nan: NaN,

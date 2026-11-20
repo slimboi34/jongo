@@ -1,7 +1,10 @@
 """Real-time push: send data from a server function straight to connected components.
 
 A channel has to be declared before anything can subscribe to it — the same rule as
-``@server``, for the same reason. The declaring function authorises each subscription:
+``@server``, for the same reason. The declaring function authorises each subscription, and
+it has to say yes: only a truthy return value allows it. ``False`` refuses (``J410``), and
+so does returning nothing at all (``J412``), so a guard with a forgotten ``return`` fails
+closed:
 
     @app.channel("room:<int:id>")
     def room(request, id):
@@ -198,7 +201,16 @@ def authorize(channels: typing.Iterable[str], declared: list[Channel], request) 
             params = pattern.match(channel)
             if params is None:
                 continue
-            if pattern.guard(request, **params) is False:
+            verdict = pattern.guard(request, **params)
+            if verdict is None:
+                # A guard that falls off the end (a forgotten `return`, a branch with no
+                # result) used to count as "yes". A missing answer is not permission.
+                raise Forbidden(
+                    f"Not allowed to subscribe to {channel!r}: the guard {pattern.name}() returned None.",
+                    code="J412",
+                    hint=f"make {pattern.name}() return True to allow the subscription and False to refuse it",
+                )
+            if not verdict:
                 raise Forbidden(f"Not allowed to subscribe to {channel!r}.", code="J410")
             allowed.append(channel)
             break

@@ -301,6 +301,107 @@ def cmd_context(args):
         print(text, end="" if text.endswith("\n") else "\n")
 
 
+def cmd_openapi(args):
+    """The OpenAPI 3.1 document for this app, generated from its type hints and models."""
+    import json
+
+    from .schema import openapi
+
+    app = load_app(args.app)
+    text = json.dumps(openapi(app, version=args.api_version, server_url=args.server), indent=2)
+    if args.output:
+        Path(args.output).write_text(text + "\n")
+        print(_c("✓", "32;1"), f"wrote {args.output}")
+    else:
+        print(text)
+
+
+def cmd_mcp(args):
+    """Serve this app to a coding agent over MCP (stdio), or list the tools it would offer."""
+    import json
+
+    out = sys.stdout
+    sys.stdout = sys.stderr  # stdout carries only protocol messages; anything the app prints goes to stderr
+    try:
+        app = load_app(args.app)
+        from .mcp import McpServer, serve_stdio
+
+        actor = None
+        if args.user:
+            from . import auth
+            from .server import database_failure
+
+            try:
+                actor = auth.User.filter(username=args.user).first()
+            except Exception as exc:
+                raise database_failure(exc, "look up the user") from None
+            if actor is None:
+                die(f"no user called {args.user!r}", hint="create one with `jongo createadmin`, or drop --user")
+        server = McpServer(app, tools=None if args.read_only else "all", act_as=actor, detail=True)
+        if args.list:
+            out.write(json.dumps({"server": f"jongo-{app.name}", "tools": server.tools()}, indent=2) + "\n")
+            return
+        serve_stdio(server, sys.stdin, out)
+    finally:
+        sys.stdout = out
+
+
+def cmd_sessions(args):
+    """List the sign-ins the server knows about, or revoke them."""
+    import json
+
+    load_app(args.app)
+    from . import auth
+    from .server import database_failure
+
+    try:
+        user = None
+        if args.user or args.revoke_user:
+            name = args.revoke_user or args.user
+            user = auth.User.filter(username=name).first()
+            if user is None:
+                die(f"no user called {name!r}")
+        if args.revoke_user:
+            ended = auth.revoke_sessions(user)
+            result = {"revoked": ended, "user": user.username}
+        elif args.revoke is not None:
+            result = {"revoked": int(auth.revoke_session(args.revoke)), "session": args.revoke}
+        else:
+            auth._ensure_table()
+            from .db import connection
+            from .db.migrate import live_tables
+
+            with connection.locked() as conn:
+                has_table = auth.LoginSession._meta.table in live_tables(conn)
+            rows = []
+            if has_table:  # no users table yet means nobody has ever signed in
+                found = auth.LoginSession.filter(user_id=user.id) if user is not None else auth.LoginSession.all()
+                names = {u.id: u.username for u in auth.User.all()}
+                rows = [{**row.to_dict(), "username": names.get(row.user_id)} for row in found]
+            result = {"sessions": rows}
+    except SystemExit:
+        raise
+    except Exception as exc:
+        raise database_failure(exc, "read the sessions") from None
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return
+    if "revoked" in result:
+        what = f"for {result['user']}" if "user" in result else f"#{result['session']}"
+        print(_c("✓", "32;1"), f"revoked {result['revoked']} session(s) {what}")
+        return
+    if not result["sessions"]:
+        print("  no active sessions")
+        return
+    header = ("ID", "USER", "LAST SEEN", "ADDRESS", "USER AGENT")
+    rows = [(str(r["id"]), r["username"] or f"#{r['user_id']}", str(r["last_seen"] or "")[:19], r["ip"] or "",
+             (r["user_agent"] or "")[:50]) for r in result["sessions"]]
+    widths = [max(len(row[i]) for row in rows + [header]) for i in range(5)]
+    print(_c("  ".join(h.ljust(w) for h, w in zip(header, widths)), "1"))
+    for row in rows:
+        print("  ".join(v.ljust(w) for v, w in zip(row, widths)))
+
+
 def cmd_doctor(args):
     """One report: is this app, on this machine, healthy? Exit 1 on any failure."""
     import json
@@ -482,6 +583,29 @@ def main(argv=None):
     p = add("context", cmd_context, "describe this app for an AI coding tool: the rules, then the app's map")
     p.add_argument("--json", action="store_true", help="the map as JSON instead of Markdown")
     p.add_argument("-o", "--output", metavar="FILE", help="write to FILE (e.g. AGENTS.md) instead of stdout")
+
+    p = add("openapi", cmd_openapi,
+            "print the OpenAPI 3.1 document for this app: every server function, page and route, from the type hints")
+    p.add_argument("-o", "--output", metavar="FILE", help="write to FILE (e.g. openapi.json) instead of stdout")
+    p.add_argument("--api-version", default="0.0.0", metavar="VERSION",
+                   help="the version to put in info.version (default 0.0.0)")
+    p.add_argument("--server", metavar="URL", help="a server URL to list, e.g. https://example.com")
+
+    p = add("mcp", cmd_mcp,
+            "serve this app to a coding agent over MCP on stdin/stdout: the jongo_* tools (context, check, doctor, "
+            "explain, status, openapi, get) plus one tool per @server function. "
+            "Register it with: claude mcp add myapp -- jongo mcp")
+    p.add_argument("--list", action="store_true", help="print the tools as JSON and exit, instead of serving")
+    p.add_argument("--read-only", action="store_true",
+                   help="offer only the jongo_* tools, not the app's @server functions")
+    p.add_argument("--user", metavar="USERNAME",
+                   help="run tool calls as this user (default: anonymous, so login_required functions refuse)")
+
+    p = add("sessions", cmd_sessions, "list the active sign-ins, or revoke them (signs those browsers out)")
+    p.add_argument("--user", metavar="USERNAME", help="only this user's sessions")
+    p.add_argument("--revoke", type=int, metavar="ID", help="end one session by id")
+    p.add_argument("--revoke-user", metavar="USERNAME", help="end every session of this user")
+    p.add_argument("--json", action="store_true", help="as JSON")
 
     p = add("doctor", cmd_doctor, "check the app, the database, the settings and the environment; exit 1 on failure")
     p.add_argument("--json", action="store_true", help="the report as JSON")

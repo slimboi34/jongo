@@ -96,6 +96,7 @@ def ping():
 
 
 def test_describe_lists_what_the_app_declares():
+    db.configure(":memory:")  # what this app declares; another module (or a PostgreSQL run) may have moved it
     d = describe(app)
     assert d["app"]["title"] == "Agentic test app"
     assert d["app"]["layout"] == "Shell"

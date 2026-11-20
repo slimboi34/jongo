@@ -23,6 +23,9 @@ jongo dev examples/patterns/01_crud.py --port 8770
 | 11 | [Background work](11_background_work.py) | Return immediately, push progress on a per-job channel |
 | 12 | [Testing](12_testing.py) | `TestClient`: pages, `rpc()`, `navigate()`, `stream()` for channels |
 | 13 | [Deployment](13_deployment.py) | PostgreSQL, secrets, migrate on start, health check, worker shape |
+| 14 | [Shared validation](14_shared_validation.py) | One `forms.Schema` checked in the browser and again on the server; `forms.Field` |
+| 15 | [Agent tools](15_agent_tools.py) | `app.mcp(tools=[...])`: server functions as MCP tools, and the OpenAPI document |
+| 16 | [Sessions and limits](16_sessions_and_limits.py) | "Where you're signed in", revoking a browser, the login throttle, `rate_limit=` |
 
 ## The three rules these examples keep repeating
 
@@ -32,7 +35,9 @@ jongo dev examples/patterns/01_crud.py --port 8770
 
 2. **Validate on the server and return errors as data.**
    `{"errors": {"email": "already taken"}}` renders next to the field. The rules live in one
-   place, where they can see the database.
+   place, where they can see the database. When you also want the answer before the request
+   is made, declare the rules as a `forms.Schema` (pattern 14): the browser runs the same
+   definition, compiled, and the server still has the last word.
 
 3. **A channel must be declared before anything can subscribe.**
    `@app.channel(...)` decides who may listen, exactly as `@server` decides what may be called.

@@ -16,6 +16,7 @@ from .app import Page
 from .errors import NotFound
 from .html import *
 from .http import CSRF_FIELD, is_local_url, redirect
+from .ratelimit import TooManyRequests
 from .styles import css
 
 PER_PAGE = 50
@@ -275,10 +276,16 @@ class Admin:
         @app.post(f"{self.path}/login")
         def admin_login_post(request):
             username = request.form.get("username", "")
-            user = auth.authenticate(username, request.form.get("password", ""))
             destination = request.form.get("next") or admin.path
             if not is_local_url(destination):  # no open redirect via //host or /\host
                 destination = admin.path
+            try:
+                user = auth.authenticate(username, request.form.get("password", ""), request)
+            except TooManyRequests as exc:  # throttled: say so on the form, with the 429 status
+                response = app.render_page(request, admin.login_page(request, destination, exc.message))
+                response.status = 429
+                response.headers["Retry-After"] = str(exc.retry_after)
+                return response
             if user is None or not user.is_admin:
                 return app.render_page(request, admin.login_page(request, destination, "Wrong username or password, or not an admin."))
             auth.login(request, user)

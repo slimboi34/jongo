@@ -15,6 +15,9 @@ the whole thing. The table, the server functions, the reactive UI and the pages 
 | `jongo doctor --json` | one health report: Python, the app loads, database reachable, pending migrations, compile errors, production settings. Exit 1 on a failure. **Run this when something is wrong and you don't know where.** |
 | `jongo explain J302` | what an error code means and how to fix it (`--list` for all of them) |
 | `jongo status --json` | with the app running: recent requests, errors with code + traceback + request id, per-route counters, likely N+1 queries |
+| `jongo mcp` | all of the above as MCP tools over stdio, plus one tool per `@server` function, so you can call the app instead of reading it: `claude mcp add {{name}} -- jongo mcp`. Tool errors carry the same codes. |
+| `jongo openapi` | the OpenAPI 3.1 document, generated from the type hints |
+| `jongo sessions --json` | the active sign-ins; `--revoke ID` / `--revoke-user NAME` end them |
 | `pytest` | the tests (`from jongo.testing import TestClient` goes through the real HTTP stack) |
 
 ## The rules that matter most
@@ -27,6 +30,12 @@ the whole thing. The table, the server functions, the reactive UI and the pages 
   reachable and their arguments are validated against the type hints before the code runs. A parameter
   annotated with a model class receives the row for the id that was sent.
 - Models are `db.Model` subclasses; the schema follows them automatically. No migration files.
+- Validate a form with one `forms.Schema` (`from jongo import forms`), not two copies of the rules:
+  `forms.validate(Schema, form_values(event))` in the component, and `data: Schema` on the `@server`
+  parameter, which receives the cleaned dict. Patterns are plain regular expressions (no `(?i)`).
+- Guards say yes explicitly: a `@app.channel` function must `return True` to allow a subscription
+  (returning nothing refuses it, J412). Put `rate_limit="5/minute"` on anything expensive or abusable;
+  `authenticate(username, password, request)` already throttles wrong passwords.
 - Keep it in one language. Do not add JavaScript, a frontend framework, or a dependency for something
   the framework already does (auth, sessions, CSRF, admin, real time, styles are built in).
 

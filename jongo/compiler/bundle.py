@@ -11,6 +11,7 @@ import hashlib
 import inspect
 import json
 import re
+import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,9 @@ def _special_objects() -> dict[int, str]:
         vdom.fragment: "$fragment",
         ServerError: "ServerError",
     }
+    forms = sys.modules.get("jongo.forms")  # only an app that imported it can reference it
+    if forms is not None:
+        special[forms.matches] = "$matches"
     for tag in html.TAGS.values():
         special[tag] = f"$h({json.dumps(tag.name)})"
     return {id(obj): js for obj, js in special.items()}
@@ -132,6 +136,8 @@ class Bundler:
             return f"$h({json.dumps(obj.name)})"
         if isinstance(obj, StyleSheet):
             return self._add(obj, f"styles__{name}", lambda _: json.dumps(obj.classes))
+        if getattr(obj, "__jongo_schema__", False):  # a forms.Schema: callable, but it is data
+            return self.constant(name, obj, fail)
         if isinstance(obj, types.ModuleType):
             if obj.__name__ in BROWSER_MODULES:
                 return f"$modules.{obj.__name__}"
