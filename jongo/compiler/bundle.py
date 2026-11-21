@@ -26,6 +26,16 @@ from .transpile import transpile_function
 RUNTIME_DIR = Path(__file__).resolve().parent
 JONGO_DIR = RUNTIME_DIR.parent
 BROWSER_MODULES = frozenset(("math", "random", "json", "time"))
+#: What each browser module implements ($modules in pyrt.js). Anything else is a compile
+#: error (J103) instead of an undefined function in the user's browser; a test keeps this
+#: table and pyrt.js in step.
+BROWSER_MODULE_MEMBERS = {
+    "math": frozenset("""pi e tau inf nan floor ceil trunc sqrt fabs exp log log10 log2 pow sin cos tan asin acos
+        atan atan2 hypot isnan isinf radians degrees""".split()),
+    "random": frozenset("random uniform randint choice shuffle".split()),
+    "json": frozenset("dumps loads JSONDecodeError".split()),
+    "time": frozenset(("time",)),
+}
 
 BOOT_FOOTER = """
 if (typeof window !== "undefined") {
@@ -44,6 +54,7 @@ def _special_objects() -> dict[int, str]:
     from .. import html
 
     special = {
+        json.JSONDecodeError: "$modules.json.JSONDecodeError",
         vdom.state: "$state",
         vdom.effect: "$effect",
         vdom.live: "$live",
@@ -147,6 +158,10 @@ class Bundler:
             )
         module = getattr(obj, "__module__", None)
         if callable(obj) and module in BROWSER_MODULES and not isinstance(obj, type):
+            if obj.__name__ not in BROWSER_MODULE_MEMBERS[module]:  # from math import gcd
+                fail(f"{module}.{obj.__name__} isn't available in browser code",
+                     f"the browser's {module} module has {', '.join(sorted(BROWSER_MODULE_MEMBERS[module]))}; "
+                     "use one of those, or do this in a @server function", "J103")
             return f"$modules.{module}.{obj.__name__}"
         if isinstance(obj, type):
             if hasattr(obj, "_meta") and hasattr(obj, "objects"):
