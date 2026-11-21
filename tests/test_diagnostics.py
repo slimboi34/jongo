@@ -783,4 +783,4 @@ def test_context_pack_and_scaffold_point_at_the_diagnostics(tmp_path):
 
 def test_public_api():
     assert callable(jongo.doctor) and callable(jongo.status) and callable(jongo.explain)
-    assert jongo.__version__ == "0.6.0"
+    assert jongo.__version__ == "0.7.0"

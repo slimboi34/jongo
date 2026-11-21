@@ -1,5 +1,359 @@
 # Changelog
 
+## 0.7.0 (2026-11-21)
+
+**Hardening.** This release is the result of a stress test of 0.6.0. Fable planned seven
+missions (HTTP and auth security, agent surfaces and denial of service, compiler and browser
+parity, the ORM and migrations under upgrade and concurrency, the CLI and patterns, and two
+runs by a smaller model working only from the docs), agents ran them in parallel, and five
+more agents fixed what they confirmed, one batch each. It fixes the 83 defects the test
+confirmed (75 new and 8 already known; 6 high, 28 medium and 49 low severity), plus one
+finding that came back without a verdict (`str.rsplit()` in the browser). The defences 0.6.0
+was designed with held: session signing, CSRF tokens, admin authorisation, SQL injection,
+path traversal, SSR escaping and MCP authentication. The six high-severity fixes are an
+unauthenticated form-parsing denial of service on every app, XSS through `redirect()` from a
+`@server` function, a quadratic regex in the error recorder, a subscriber leak on
+`HEAD /_jongo/live`, a login-throttle reset through a look-alike account, and a crash on any
+`data:` URL. Still zero dependencies.
+
+Read "Changed" before upgrading: there are new refusals, a new default header, and browser
+code that raises where it used to return a wrong value.
+
+### Security
+
+- **An anonymous request could make any app parse 16 MB of form before the CSRF check.**
+  `POST /_jongo/rpc/<anything>` parsed a multipart or urlencoded body to look for
+  `csrf_token` when no `X-CSRF-Token` header was sent: about 1 CPU-second per MB of tiny
+  parts, and 650 MB of memory for 14 MB of empty fields. Server calls now take the token from
+  the header only, the cookie's signature is checked before any body is read, and forms are
+  capped before parsing: `Request.max_form_fields` and `Request.max_form_parts` (1000 each)
+  refuse larger ones with a 413 (`J212`). Multipart bodies are split with plain byte
+  operations instead of the email parser, so 8 MB of newlines in one field takes 2 ms instead
+  of 1.5 s, and a part naming a charset with a quadratic decoder (`punycode`, `idna`) is read
+  as UTF-8.
+- **A `@server` function could send the browser to a `javascript:` URL.** A server-call
+  redirect must now be relative or `http(s)`; anything else is a 500 (`J408`) naming the
+  function and never reaches the browser. In the browser, `navigate()` (which also follows
+  server-call redirects) accepts only `http:` and `https:` URLs and reports anything else
+  (the overlay in dev, the console in production). `redirect()`'s docstring says to pass a
+  target taken from the request through `is_local_url()`, which is now exported as
+  `jongo.is_local_url`.
+- **One request could cost seconds of CPU in the error recorder.** `monitor.redact()` ran its
+  credential pattern over the whole error message before cutting it to 300 characters, which
+  is quadratic on a long message of many `://` and no `@` (4 s for a 97 KB request). The
+  message is cut first, and a password the cut runs through is masked to the end.
+- **`HEAD /_jongo/live` (and the MCP `jongo_get` tool) left a subscriber registered forever**,
+  each holding a 100-message queue that every `broadcast()` filled. A stream now subscribes
+  only once the server starts sending it, and `HEAD` gets the headers alone. A process holds
+  at most `live.MAX_SUBSCRIBERS` (10,000) live connections; past that a new one gets a 503.
+- **A look-alike account could reset someone else's login throttle.** Wrong passwords were
+  counted under the lower-cased username while the account lookup is exact, so a correct
+  password for `Ann` cleared the count for `ann`, and an attacker who signed up as `Ann` could
+  keep guessing until the per-address limit (50) stopped them. The count is now kept per exact
+  username, and a correct password clears only its own. Pattern 16's "username taken" check
+  is now case-insensitive as well.
+- **A revoked sign-in kept receiving on an open live stream.** A stream opened by a signed-in
+  user re-checks the sign-in before delivering a message and on keepalives (at most once per
+  `live.SESSION_CHECK_SECONDS`, 5 s) and ends once it is revoked, expired or the password
+  changed. `auth.logout()`, `auth.revoke_session()` and `auth.revoke_sessions()` end the
+  affected streams at once; `live.hub.drop_session()` and `live.hub.drop_user()` do the same
+  for code that removes sign-ins some other way.
+- **`jongo dev` answered any `Host`, so a web page could reach it by DNS rebinding** (the
+  debug page with source, `/_jongo/status`, the OpenAPI document, `@server` calls). Under
+  `jongo dev` the app answers `localhost`, `*.localhost` and IP addresses only; any other name
+  is a 400 (`J214`) unless listed in the new `Jongo(allowed_hosts=[...])` (`".example.com"`
+  or `"*.example.com"` also allows subdomains). In production the check applies when
+  `allowed_hosts` is set.
+- **The CSRF `Origin` check ignored the scheme**, so an `http://` page (which an on-path
+  attacker can inject into) could post to the `https` site. Scheme and host must both match;
+  an `https` `Origin` on an app that sees `http` (TLS ended at a proxy without
+  `trust_proxy=True`) is still accepted. `login()` and `logout()` now replace the CSRF token
+  (new `request.rotate_csrf()`), so a token minted or planted before sign-in stops working.
+- **Pages could be framed by any site** (clickjacking). Every response carries
+  `X-Frame-Options: SAMEORIGIN` and, unless it sets its own `Content-Security-Policy`,
+  `frame-ancestors 'self'`. `Jongo(frame_options="DENY")` forbids framing and `None` turns it
+  off. The admin keeps its `DENY`.
+- **A sign-up loop never hit a `rate_limit=`.** A signed-in caller was counted by user alone,
+  so each new account started a fresh window. Every request now counts against the client
+  address, and against the user as well when someone is signed in; it is refused if either is
+  over, and then neither is charged. `ratelimit.ADDRESS_FACTOR` (default `1`) loosens the
+  address side for many users behind one address; `None` restores the 0.6 behaviour.
+- **Flooding the rate limiter with fresh keys could lift a throttled login.** A full limiter
+  (50,000 keys) dropped the oldest 10% of keys whatever their state, and the login throttle
+  shared it with every `rate_limit=`, so about 50,000 cheap requests bought 10 more password
+  guesses. Keys with nothing left in their window now go first, then the least recent keys
+  still under their limit; a key over its limit is never dropped, and if every key is, a new
+  caller gets a 429. `authenticate()` has a limiter of its own (`auth.limiter`).
+- **`User.create(password=...)` stored the raw password**, as did assigning `user.password`
+  and calling `save()`. Saving a `User` whose password isn't a stored hash now raises
+  `ValidationError` ("use User.create_user(...) or user.set_password(...)"). `login()` writes
+  only `last_login`, so a row an older version stored that way can still sign in.
+- **`@server` arguments typed `date`, `datetime`, `time`, `UUID`, `Decimal`, `bytes` or an
+  `Enum` arrived unchecked**: the function got whatever JSON was sent, although the OpenAPI
+  and MCP schemas promised a format. They are converted now (ISO 8601 text, UUID text,
+  finite `Decimal` from text or a number, base64 text, the member's value), and anything else
+  is a 400 (`J403`). A parameter annotated with a type Jongo can't check is refused when the
+  function is defined (`J405`; see Changed).
+- **Login timing revealed accounts with no password.** A user with a blank or unusable
+  password answered a wrong guess at once, while an unknown username cost one PBKDF2 hash.
+  Every path now does one hash.
+- **`Schema.from_model()` included `is_admin` by default**, so a sign-up form built from
+  `auth.User` accepted `{"is_admin": true}`. `is_admin`, `is_staff`, `is_superuser` and
+  `password` are left out unless `only=` names them, with a warning outside production.
+- **`style={...}` values could add CSS declarations in server-rendered HTML.** A value
+  containing `;`, `{`, `}`, `<` or a backslash, or with unbalanced quotes or parentheses, is
+  dropped on the server and in the browser alike (logged at INFO, so `jongo dev` shows it).
+- **The official sign-in pattern was an open redirect.** `examples/patterns/02_auth.py`
+  redirected to whatever `?next=` said (`https://evil.example`, `//evil.example`,
+  `/\evil.example`). It now keeps `next` only when `is_local_url()` accepts it, and passes the
+  request to `authenticate()` so wrong passwords are also counted per address. If you copied
+  pattern 02, make the same change.
+
+### Fixed
+
+HTTP, live streams and MCP:
+
+- A non-ASCII byte in the `jongo_csrf`/`jongo_session` cookie or `X-CSRF-Token` made every
+  request a 500; such a token is treated as absent. A multipart part with an unknown charset
+  was a 500; it is read as UTF-8.
+- Deeply nested JSON was a 500 (`RecursionError`) on `/_jongo/rpc/` and `/_jongo/mcp`; it is a
+  400 (`J402`, or `J422` for MCP). One such line no longer ends `jongo mcp`.
+- `/static/` with a NUL byte or an over-long name was a 500; it is a 404.
+- `redirect()` to a URL with non-ASCII characters sent a truncated response on the built-in
+  server. `redirect()` percent-encodes what a `Location` header can't carry (`/€` becomes
+  `/%E2%82%AC`); any other header a server can't send is a 500 that names it, `set_cookie()`
+  refuses a value it can't encode, and the test client fails on such headers too.
+- A `bool` or `list` page/route query parameter could never be set (always `J211`). `bool`
+  accepts `true/1/on/yes` and `false/0/off/no`; `list[int]` and friends collect a repeated key.
+- The over-cap live channel refusal had no code. It is `J210`, says how many channels were
+  asked for and names `live.MAX_CHANNELS` (20); `/_jongo/live` refusals are JSON. In the
+  browser, a refused stream no longer retries forever: it is probed once, a 4xx stops the
+  retries and reports the server's message, and in dev the runtime warns before connecting
+  with more than 20 channels.
+- `app.root` fell back to the current directory when `Jongo(name)` wasn't an imported module's
+  name, putting the database, the secret key and `static/` in the wrong place. It now uses the
+  directory of the file that created the app, and the current directory only as a last
+  resort, with a warning.
+
+Compiler and browser runtime:
+
+- Any `data:` URL in an `href` or `src` threw while mounting or hydrating, so one stored
+  `data:` avatar broke the page for every viewer. Browser and server now give the same
+  verdict for every URL.
+- A module whose name starts with a digit (`14_shared_validation.py`, loaded under its file
+  name) compiled to invalid JavaScript; unit names get a `_` prefix when they need one.
+  `jongo check`, `jongo doctor`, `jongo build` and server start also parse the finished bundle
+  with `node --check` when node is installed, and report a failure as `J100` naming the line
+  and the unit.
+- `(7).numerator` broke the whole bundle; it is a `J104` compile error. Unsupported `math`,
+  `random`, `time` and `json` members (`math.gcd`, `random.sample`, `time.sleep`) are `J103`
+  compile errors instead of failing in the browser; `json.JSONDecodeError` exists there now.
+- A keyed list reorder blurred the focused input; the runtime uses `moveBefore` where the
+  browser has it and otherwise restores focus and the selection.
+- Server-rendered and browser text differed: the browser wrote attribute values and number
+  children with JavaScript's `String()` (`1,2`, `[object Object]`), and `inf`/`nan` props
+  arrived as `null`. It now writes what `str()` writes (`[1, 2]`, `(1, 2)`, `{'k': 1}`,
+  `inf`), and non-finite floats in props and bundle constants arrive as floats.
+- `forms.Float` accepted NaN (it compares false with every bound); it is refused. `forms.Int`
+  raised a 500 on more than 4300 digits; leading zeros are dropped and more than 16
+  significant digits is the type message, on both sides. `J115` now also refuses patterns the
+  browser's Unicode-mode `RegExp` can't read: `x{,3}`, an unescaped `{` or `}`, `\a`, `\U` and
+  octal escapes.
+- Browser code now matches CPython in:
+  - arithmetic: `/`, `//`, `%`, `**` and `divmod` by zero (or `False`) raise
+    `ZeroDivisionError`; float `//`, `%` and `divmod` follow CPython (`0.1 % 1` is `0.1`);
+    `pow(a, b, m)` is exact and takes a negative exponent; `~x` is no longer 32-bit;
+    `round(x, n)` is exact from `1e21`; `sum()` of floats is compensated, as on 3.12+;
+  - comparisons: `<`, `<=`, `>`, `>=` compare lists and tuples item by item and sets by
+    inclusion, and raise `TypeError` for `None` or mixed types (also in `sorted`, `min`,
+    `max`); a chained comparison evaluates each operand once;
+  - containers: sets compare tuples by value (`(0, 0) in seen`); `True` works as an index and a
+    dict key; `*=`, `|=`, `-=`, `&=` and `^=` mutate in place; tuple slices,
+    `partition()`/`rpartition()` and `*args` are tuples; a `"__proto__"` key is kept;
+  - methods read without a call: `max(d, key=d.get)`, `sorted(xs, key=str.lower)` and
+    `map(str.upper, xs)` work, and a `key` that isn't callable is a `TypeError`;
+  - strings: `find`, `rfind`, `index`, `rindex`, `count`, `startswith`, `endswith` and
+    `list.index` take `start`/`end` (a `find` loop no longer hangs the tab); offsets and
+    padding count code points; `strip()`/`split()` use `str.isspace()`'s whitespace;
+    `rsplit()` splits from the right; `splitlines()`, `replace("", x)`, `isdigit()`,
+    `isnumeric()`, `title()`, `capitalize()`, `casefold()` and `center()` follow Python;
+  - text: `float()` follows Python's grammar (`float("")` is a `ValueError`); `f"{2.5:.0f}"`
+    and `"%.2f" % 0.125` round half-to-even; `%`-formatting supports every conversion and
+    flag; `repr()` picks quotes and escapes as CPython does; floats switch to exponent form
+    below `1e-4` and from `1e16`; `bool(float("nan"))` is `True`;
+  - `json.dumps` writes Python's text and takes `sort_keys`, `indent`, `separators`,
+    `ensure_ascii`, `allow_nan` and `default`; a `json.loads` error is a
+    `json.JSONDecodeError`, which `except ValueError` catches;
+  - scope and errors: `nonlocal` on a loop variable no longer throws; `except AttributeError`
+    catches `None.attr`; a carriage return in f-string text stays a carriage return.
+
+Auth, server functions and OpenAPI:
+
+- The OpenAPI request body of a `@server` function required `kwargs`, while the browser posts
+  `{"args": [...]}`. It now describes `args` and `kwargs`, neither required by itself, with an
+  `anyOf` of each valid way to pass the required parameters. The MCP `inputSchema` is
+  unchanged.
+- Two processes signing in at once after an upgrade could fail with `J303` (both ran
+  `CREATE TABLE jongo_sessions`); the check and the create are now one write transaction.
+- A `float` argument of `10**400` was a 500; it is a 400 (`J403`).
+
+ORM and migrations (verified on SQLite; see Known limits):
+
+- `DateTime` lookups given an ISO string (`"2024-03-10T12:00:00Z"`, `"...+05:00"`) compared
+  raw text and returned the wrong rows. Strings are parsed and compared as the instant they
+  name; text that doesn't parse is still compared as text, so `__startswith="2024-03"` keeps
+  working. `Date` lookups accept full datetime strings.
+- A NUL character in a `contains`/`startswith`/`endswith` term (or the `i…` forms and
+  `iexact`) matched unrelated rows on SQLite; such a term now matches nothing, as on
+  PostgreSQL.
+- Integers beyond 64 bits gave a bare `OverflowError` (a 500 with no code). They fail
+  validation with `J304` for an `Int`, a `ForeignKey` or an explicit `id`, and lookups answer
+  as Python would (`get(id=2**63)` raises `DoesNotExist`). `filter(n__in=["abc"])` on a number
+  column no longer matches NULL rows.
+- `db.JSON` stored `NaN` and `Infinity`, which aren't JSON; saving one is a `J304`.
+- A SQLite table rebuild reset the `AUTOINCREMENT` counter, so the ids of deleted rows were
+  handed out again. The counter is carried over.
+- Changing a `Text` field to `Int`, `Float` or `Bool` on SQLite went through silently when
+  rows held values that don't convert, and one such row made every read of a `Float` field
+  fail. `migrate()` refuses with `J303`, naming the column, the row count and the first ids;
+  `--allow-destructive` applies it and keeps those values.
+- After a field was removed, every insert failed with "__all__: This field is required."; the
+  error now names the leftover `NOT NULL` column and how to drop it.
+- A `ForeignKey` to an undefined model was reported as `J303` with an unhelpful hint; it is
+  `J310` with the hint to define or import the model, in `migrate` and `jongo check`.
+- `help_text=` and `on_delete="NO ACTION"` were documented but rejected. `help_text=` is an
+  alias for `help=`, and `NO ACTION` is a valid `on_delete`.
+
+CLI, examples and docs:
+
+- Pattern 12 failed its own documented `pytest` command (1 passed, 4 errors); its app is now at
+  module level with a fresh in-memory database per test, and the suite runs it. Pattern 06
+  showed the oldest 50 chat messages instead of the newest.
+- `--json` printed nothing on stdout when `routes`, `context`, `sessions` or `explain` failed;
+  it prints `{"ok": false, "error": {...}}` and exits 1.
+- Ordinary CLI mistakes printed tracebacks: a `--port` outside 0-65535 (now exit 2), a
+  `--host` the machine can't listen on (`J505`, exit 3, and `jongo dev`'s reloader stops), an
+  unwritable `-o` path, `jongo build` or `jongo new` target (new `J515`). A bad `$PORT` only
+  affects `jongo run`.
+- `jongo sessions --revoke 99999` printed "revoked 0 session(s)" and exited 0; it exits 1.
+  Listing sessions on a database where nobody has signed in no longer fails with `J302`.
+- `ratelimit.parse(("5", "60"))` (or NaN, infinity, a bool) raised a bare `TypeError`; it is
+  `J513`. `doctor(app, port=99999)` raised `OverflowError`; it reports a failed check. The MCP
+  `jongo_get` and `jongo_describe` tools say what to pass instead of giving JSON-RPC advice.
+- The README's testing snippet failed against the README's own app; guide §9 named
+  `help_text` as the field option; the patterns README said thirteen patterns (there are
+  sixteen). All fixed, with tests.
+
+### Changed (behaviour of existing apps)
+
+- **New refusals.** Forms over 1000 fields or 1000 parts (413, `J212`). Under `jongo dev`, a
+  `Host` that isn't localhost or an IP address (400, `J214`): add a tunnel's name to
+  `allowed_hosts`. An `http://` `Origin` on an `https` request (403, `J207`). A server-call
+  redirect to a non-http(s) scheme (500, `J408`). More than `live.MAX_SUBSCRIBERS` live
+  connections (503). Saving a `User` with an unhashed password (`ValidationError`). A
+  `@server` parameter annotated with a type Jongo can't check, such as a plain class,
+  `Callable` or `type[X]`, even inside a container or union (`J405` when the function is
+  defined; annotate with `Any` to check the value yourself). Malformed `date`/`UUID`/
+  `Decimal`/`Enum` arguments (`J403`) and query parameters (`J211`). Integers outside
+  -2^63 to 2^63-1 in `Int`, `ForeignKey` and `id` (`J304`). `NaN`/`Infinity` in `db.JSON`
+  (`J304`). A SQLite type change that would leave values unconverted, unless
+  `--allow-destructive` (`J303`; `jongo dev` stops at start with it).
+- **New default headers**: `X-Frame-Options: SAMEORIGIN`, and `Content-Security-Policy:
+  frame-ancestors 'self'` when the response has no CSP. An app meant to be embedded on other
+  sites passes `Jongo(frame_options=None)`.
+- **Rate limits count the address and the user.** Signed-in users behind one address now
+  share that address's count for each `rate_limit=`; raise `ratelimit.ADDRESS_FACTOR` if
+  that is too tight. The login throttle is keyed on the exact username (`"ANN "` and `"ann"`
+  count separately), and `ratelimit.limiter.reset()` no longer clears it (use
+  `auth.limiter.reset()`).
+- **Browser code raises where it used to return a wrong value**: `ZeroDivisionError`,
+  `TypeError` for unorderable comparisons, a non-callable `key` or an unhashable set member,
+  `ValueError` from `float("")`, `OverflowError` from `int(float("inf"))`. Floats from `1e16`
+  and below `1e-4` print in exponent form, and since a JavaScript number can't tell an int
+  from a float, whole numbers from `1e16` up print that way too. `navigate()` refuses
+  `mailto:` and `tel:` as well; use a link for those.
+- `Schema.from_model()` without `only=` leaves out the privileged fields; name them in
+  `only=` to include them. `portable_pattern()` refuses more patterns (`J115`).
+- In a union, an option the value already is exactly is chosen before converting:
+  `int | str` keeps `"007"`, `int | float` keeps `2.0` a float. `TypedDict`, `NewType`,
+  `Annotated[...]` and the abstract containers are checked at the `@server` boundary; a
+  `TypedDict` argument arrives with only its declared keys.
+- `DateTime` and `Date` lookups compare ISO strings as instants (results change for apps that
+  filtered with strings). A NUL in a pattern lookup matches nothing. `ne` against an
+  out-of-range integer matches every row, NULL included.
+- `redirect()` percent-encodes characters a `Location` can't carry (non-ASCII, spaces,
+  backslashes, control characters). The CSRF token in a form field is no longer read on
+  `/_jongo/` endpoints (server calls always sent the header). `/_jongo/live` refusals are JSON,
+  and `HEAD` on it returns headers only.
+- With node on PATH, `jongo check` and every start-up check run `node --check` on the bundle
+  (about 50-100 ms).
+- `jongo new` also writes `tests/conftest.py` (every test gets a fresh in-memory database, so
+  tests no longer write to `db.sqlite3`) and `tests/test_app.py`. `jongo sessions --revoke`
+  exits 1 when nothing was revoked. `jongo dev --host` with a non-local address prints a
+  `J214` note. `J505` is now "Port in use, or the address can't be listened on".
+- `TestClient.stream()` runs the response to its first chunk, as a server does, and the test
+  client raises `ValueError` on a response header a real server couldn't send.
+- New API: `Jongo(allowed_hosts=, frame_options=)`, `Request.max_form_fields`,
+  `Request.max_form_parts`, `request.rotate_csrf()`, `Response.wsgi_headers()`,
+  `jongo.is_local_url`, `live.MAX_SUBSCRIBERS`, `live.SESSION_CHECK_SECONDS`,
+  `live.hub.drop_session()`, `live.hub.drop_user()`, `auth.limiter`,
+  `ratelimit.ADDRESS_FACTOR`, `ratelimit.client_keys()`, `forms.PRIVILEGED_FIELDS`,
+  `vdom.css_declaration_ok()`, `vdom.to_json_data(browser=True)`, `Field(help_text=)`,
+  `on_delete="NO ACTION"`, `Operation.lossy`, and error codes `J214` (Host not allowed) and
+  `J515` (can't write the file or directory).
+
+### Known limits
+
+- PostgreSQL was not available, so the ORM and migration fixes are verified on SQLite only
+  and the 13 PostgreSQL tests were skipped. With `--allow-destructive`, SQLite applies a lossy
+  type change and keeps the unconvertible values; PostgreSQL still refuses it.
+- The browser fixes were tested under Node with DOM stand-ins, not in a real browser
+  (`navigate()` refusal, the focus restore after a keyed reorder, the refused-stream report).
+- Browser code still differs from CPython in a few places, listed in guide §18: integer-like
+  dict keys iterate in ascending order (a Map-backed dict is a larger change), generator
+  expressions are eager so `any()`/`all()` don't stop early, an integral float prints like an
+  int (`str(2.0)` is `"2"`, `str(-0.0)` is `"0"`), `json.loads` rejects the `NaN`/`Infinity`
+  tokens Python accepts, `casefold()` doesn't apply the Cherokee and Greek-extended folds, and
+  `sum()` can differ when huge values cancel around an int. Server-call results still send
+  `inf`/`nan` as `null`.
+- A naive datetime, as an object or a string, compared with aware stored values compares the
+  stored text and can miss an equal instant. Filter aware columns with aware values.
+- Usernames are unique case-sensitively; the throttle no longer depends on it, but an app that
+  wants `Ann` and `ann` to be one name must check with `username__iexact` (as pattern 16 does).
+  Making it the default needs a data migration.
+- `QuerySet.update(password=...)` and bulk inserts bypass the stored-hash check.
+- The CSRF token is not bound to the session and has no expiry; `allowed_hosts` is opt-in in
+  production. Both need their own design so that open tabs and proxied deployments keep
+  working.
+- A caller who can cheaply create keys that are over their limit (for example
+  `ratelimit.check(key=email)` at `"1/hour"`) can fill the shared limiter, and new callers get
+  a 429 until those keys age out. The login throttle has its own limiter and isn't affected.
+- SQLite connections of finished request threads are freed by the cyclic garbage collector,
+  not when the request ends (bounded, not a leak).
+- `jongo_status` says `mode: production` while `jongo_doctor` says `production: false` under
+  `jongo mcp`; they answer different questions, which guide §21 and §26 now explain.
+- `docs/jongo-guide.html` and `.pdf` predate this release; `docs/guide.md` is current.
+
+### Tests
+
+- 543 → 977 tests (`tests/test_fixes_070_http.py`, `test_fixes_070_compiler.py`,
+  `test_parity_070.py`, `test_fixes_070_auth.py`, `test_fixes_070_db.py`,
+  `test_fixes_070_cli.py`, and new cases in `test_patterns.py`). The suite passes forwards and
+  in reversed file order on Python 3.12, and on 3.10, 3.11, 3.13 and 3.14 (the
+  `jsonschema`-backed table tests skip when that package is absent). The PostgreSQL tests
+  were not run.
+- The stress test's 74 repro scripts were re-run against the release: 61 pass. Of the rest,
+  10 can't pass as written (two need Playwright and Chrome; the others count a deliberate
+  refusal, such as the coded `J104` for `(7).numerator`, or a now-supported case as the bug,
+  or run an app's tests without the new database fixture), and 3 still show a difference
+  that is a documented limit above (`str(-0.0)`, an integral float's text, and
+  naive-versus-aware datetimes).
+- Tests that asserted 0.6 behaviour were updated: the framing default
+  (`test_security_041`), the case-insensitive throttle key, per-user-only limits and the
+  login limiter (`test_security_060`, `test_mcp`), and the OpenAPI body (`test_schema`).
+- The `sum()` parity sample compares against CPython 3.12's results on 3.10 and 3.11, which
+  add floats naively.
+
 ## 0.6.0 (2026-11-20)
 
 **Contracts.** The types an app already declares now do four more jobs: they validate a form

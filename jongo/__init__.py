@@ -41,7 +41,7 @@ from .vdom import (
     state,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "Jongo", "Page", "Request", "Response", "redirect", "json_response", "is_local_url",

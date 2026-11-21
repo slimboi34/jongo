@@ -527,7 +527,7 @@ cd examples/todo && ../../.venv/bin/jongo dev
 
 ## Status
 
-Version 0.6 (see `CHANGELOG.md`). Known limits:
+Version 0.7 (see `CHANGELOG.md`). Known limits:
 - Rate limits and the login throttle count in each process's memory: exact with one worker, per worker with several, cleared by a restart.
 - Form schemas validate flat fields (no nested objects or lists).
 - The MCP server offers tools and resources over stdio and plain JSON-over-HTTP; it doesn't push (no server-sent stream, no prompts, no sampling).
