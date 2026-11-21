@@ -457,7 +457,18 @@ class JSON(Field):
     kind = "json"
 
     def to_db(self, value: Any) -> Any:
-        return None if value is None else json.dumps(value)
+        return None if value is None else self._dumps(value)
+
+    def _dumps(self, value: Any) -> str:
+        """Strict JSON: NaN and Infinity are not JSON, so browsers and SQLite's json_valid() reject them."""
+        try:
+            return json.dumps(value, allow_nan=False)
+        except ValueError as exc:
+            if "JSON compliant" in str(exc):  # json's wording for an out-of-range float
+                self.fail("Enter finite numbers only (not NaN or infinity).")
+            self.fail("Value is not JSON serialisable.")
+        except TypeError:
+            self.fail("Value is not JSON serialisable.")
 
     def to_python(self, value: Any) -> Any:
         if value is None:
@@ -472,16 +483,13 @@ class JSON(Field):
             if not value.strip():
                 return None
             try:
-                return json.loads(value)
+                value = json.loads(value)  # accepts NaN/Infinity tokens, so check the result below
             except ValueError:
                 self.fail("Enter valid JSON.")
         return self.coerce(value)
 
     def coerce(self, value: Any) -> Any:
-        try:
-            json.dumps(value)
-        except (TypeError, ValueError):
-            self.fail("Value is not JSON serialisable.")
+        self._dumps(value)
         return value
 
     def validate(self, value: Any) -> None:

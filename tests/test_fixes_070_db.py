@@ -95,3 +95,48 @@ def test_jongo_check_reports_j310_for_a_foreign_key_to_an_undefined_model():
     problems = [p for p in check(app)["problems"] if p["kind"] == "migrations"]
     assert [p["code"] for p in problems] == ["J310"]
     assert "Nope" in problems[0]["message"] and "null=True" not in problems[0]["hint"]
+
+
+# ------------------------------------------------------------- db.JSON rejects NaN/Infinity ---
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+def test_json_field_rejects_nan_and_infinity(bad):
+    class Reading(db.Model):
+        data = db.JSON(null=True)
+
+    db.migrate()
+    with pytest.raises(db.ValidationError) as caught:
+        Reading.create(data={"value": bad, "nested": [1, 2]})
+    assert caught.value.code == "J304"
+    assert caught.value.errors == {"data": "Enter finite numbers only (not NaN or infinity)."}
+    assert Reading.count() == 0
+
+    good = Reading.create(data={"value": 1.5})
+    with pytest.raises(db.ValidationError, match="finite numbers"):
+        Reading.filter(id=good.pk).update(data=[bad])
+    with pytest.raises(db.ValidationError, match="finite numbers"):  # a JSON string with NaN tokens too
+        db.JSON().clean('{"value": NaN}')
+    assert Reading.get(id=good.pk).data == {"value": 1.5}
+
+
+def test_json_field_still_reports_unserialisable_values():
+    field = db.JSON()
+    with pytest.raises(db.ValidationError, match="not JSON serialisable"):
+        field.clean({"when": object()})
+    circular: list = []
+    circular.append(circular)
+    with pytest.raises(db.ValidationError, match="not JSON serialisable"):
+        field.clean(circular)
+    assert field.clean('{"a": [1, 2.5, null]}') == {"a": [1, 2.5, None]}
+
+
+@sqlite_only
+def test_stored_json_is_strictly_valid():
+    class Reading(db.Model):
+        data = db.JSON(null=True)
+
+    db.migrate()
+    Reading.create(data={"value": 1e308, "list": [-0.0, 3]})
+    row = connection.get_connection().execute(f'SELECT json_valid(data) FROM "{Reading._meta.table}"').fetchone()
+    assert row[0] == 1
