@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import getpass
 import importlib
 import os
@@ -171,14 +172,23 @@ def port_number(text: str) -> int:
 
 _LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
+#: OSError numbers that mean "can't listen on that address" when the server binds.
+_BIND_ERRNOS = {errno.EADDRINUSE, errno.EADDRNOTAVAIL, errno.EACCES, errno.EPERM, errno.EAFNOSUPPORT,
+                errno.EINVAL}
+
 
 def serve_or_die(app, host: str, port: int, **kwargs):
     """``app.run()``; an address the server can't listen on is J505, not a traceback."""
+    import socket
+
     from .server import EXIT_PORT_IN_USE
 
     try:
         app.run(host=host, port=port, **kwargs)
     except (OSError, OverflowError) as exc:
+        if isinstance(exc, OSError) and not isinstance(exc, (socket.gaierror, socket.herror)) \
+                and exc.errno not in _BIND_ERRNOS:
+            raise
         reason = getattr(exc, "strerror", None) or str(exc)
         # A distinct exit status, so `jongo dev`'s reloader stops instead of waiting for an edit.
         die(f"can't listen on {host}:{port}: {reason}", code=EXIT_PORT_IN_USE, error="J505")
