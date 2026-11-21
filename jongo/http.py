@@ -388,10 +388,10 @@ class Request:
     def rotate_csrf(self) -> str:
         """Issue this browser a fresh CSRF token; the response carries it as a new cookie.
 
-        Call it when the user's privileges change, so a token someone planted or saw
-        before (say, before sign-in) stops being the one the page uses. ``jongo.auth``'s
-        ``login()`` and ``logout()`` call it. Returns the new token, which is also
-        ``request.csrf_token`` from now on (pages rendered later in this request embed it).
+        Call it when the user's privileges change (signing in or out), so a token someone
+        planted or saw before stops being the one the page uses. Returns the new token, which
+        is also ``request.csrf_token`` from now on (pages rendered later in this request
+        embed it).
         """
         signer = self._signer
         self._csrf_token = signer.dumps(secrets.token_urlsafe(16)) if signer is not None \
@@ -478,7 +478,9 @@ def _multipart_parts(body: bytes, delimiter: bytes) -> list[bytes]:
     for index in range(1, len(pieces)):
         before, piece = pieces[index - 1], pieces[index]
         at_line_start = before.endswith(b"\n") or (index == 1 and before == b"")
-        closing = piece.startswith(b"--")
+        # "--boundary--" closes the body; so does a bare delimiter at its very end (a client that
+        # left off the final "--"), rather than starting an empty part.
+        closing = piece.startswith(b"--") or (index == len(pieces) - 1 and not piece.strip())
         if at_line_start and (closing or _DELIMITER_END.match(piece)):
             if current is not None:
                 last = current[-1]  # == before: drop the line break that belongs to the delimiter

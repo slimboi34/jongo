@@ -190,6 +190,10 @@ def test_multipart_edge_cases():
     body = b'preamble\n--q  \nContent-Disposition: form-data; name="a"\n\nline1\nline2\n--q--\nepilogue'
     assert client.post("/open", data=body, headers={"Content-Type": 'multipart/form-data; boundary="q"'}
                        ).json()["form"] == {"a": ["line1\nline2"]}
+    # a body whose closing delimiter lacks its final "--"
+    body = b'--q\r\nContent-Disposition: form-data; name="a"\r\n\r\nv\r\n--q\r\n'
+    assert client.post("/open", data=body, headers={"Content-Type": "multipart/form-data; boundary=q"}
+                       ).json()["form"] == {"a": ["v"]}
     # the boundary text inside a value, not at the start of a line, is content
     body, ctype = multipart(("a", "x--XyZ y"))
     assert client.post("/open", data=body, headers={"Content-Type": ctype}).json()["form"] == {"a": ["x--XyZ y"]}
