@@ -343,10 +343,13 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J212": _e(
         "Malformed request body",
-        "The request body couldn't be read: it isn't valid JSON, the Content-Length header is invalid, "
-        "or it is larger than the app's limit (max_body_size).",
+        "The request body couldn't be read: it isn't valid JSON (or is nested too deeply), the "
+        "Content-Length header is invalid, it is larger than the app's limit (Request.max_body_size), or "
+        "a form has more fields or multipart parts than Request.max_form_fields / Request.max_form_parts "
+        "allow (1000 each). Oversized bodies and forms are refused with a 413 before they are parsed.",
         "Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for "
-        "larger uploads raise jongo.Request.max_body_size (16 MB by default).",
+        "larger uploads raise jongo.Request.max_body_size (16 MB by default), for bigger forms "
+        "Request.max_form_fields / max_form_parts.",
     ),
     "J213": _e(
         "Too many requests (rate limit)",
@@ -460,9 +463,12 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J405": _e(
         "Server function type hint can't be resolved",
-        "A parameter annotation names a type Jongo can't find. Without it the argument can't be "
-        "validated, so the function refuses to run.",
-        "Define the annotated type (e.g. the model) at module level where the function can see it, or drop the annotation.",
+        "A parameter annotation names a type Jongo can't find, or one it doesn't know how to check. "
+        "Without it the argument can't be validated, so the function refuses to run. The types it checks: "
+        "str, int, float, bool, None, list/tuple/set/dict, Optional and unions, Literal, dataclasses, "
+        "models, forms.Schema, date/datetime/time, UUID, Decimal, bytes (base64) and Enum.",
+        "Define the annotated type (e.g. the model) at module level where the function can see it, annotate "
+        "with one of the checked types, or drop the annotation.",
     ),
     "J406": _e(
         "Two server functions share an id",
@@ -478,8 +484,11 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J408": _e(
         "Server function returned an unsupported response",
-        "A server function may return data or redirect(); other Response objects can't be sent back to a server call.",
-        "Return JSON-able data, or redirect(url).",
+        "A server function may return data or redirect(); other Response objects can't be sent back to a "
+        "server call, and neither can a redirect to anything but a relative or http(s) URL (a javascript: "
+        "or data: target is refused rather than handed to the browser).",
+        "Return JSON-able data, or redirect(url) to a path on this site (check user-supplied targets with "
+        "jongo.is_local_url) or an http(s) URL.",
     ),
     "J410": _e(
         "Channel subscription refused",

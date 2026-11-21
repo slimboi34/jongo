@@ -18,7 +18,7 @@ the whole thing. The table, the server functions, the reactive UI and the pages 
 | `jongo mcp` | all of the above as MCP tools over stdio, plus one tool per `@server` function, so you can call the app instead of reading it: `claude mcp add {{name}} -- jongo mcp`. Tool errors carry the same codes. |
 | `jongo openapi` | the OpenAPI 3.1 document, generated from the type hints |
 | `jongo sessions --json` | the active sign-ins; `--revoke ID` / `--revoke-user NAME` end them |
-| `pytest` | the tests (`from jongo.testing import TestClient` goes through the real HTTP stack) |
+| `pytest` | the tests in `tests/` (`from jongo.testing import TestClient` goes through the real HTTP stack; `tests/conftest.py` gives every test a fresh in-memory database) |
 
 ## The rules that matter most
 
@@ -36,6 +36,14 @@ the whole thing. The table, the server functions, the reactive UI and the pages 
 - Guards say yes explicitly: a `@app.channel` function must `return True` to allow a subscription
   (returning nothing refuses it, J412). Put `rate_limit="5/minute"` on anything expensive or abusable;
   `authenticate(username, password, request)` already throttles wrong passwords.
+- Accounts: sign-up is `User.create_user(username, password, **fields)`, which hashes the password.
+  Never `User.create(password=...)`: `save()` refuses a password that isn't a hash. `login_required`
+  pages redirect to `login_url` (default `/login`) with `?next=`; that page doesn't exist until you
+  define it, and after `login()` redirect to `next` only if `is_local_url(next)` (`from jongo import
+  is_local_url`), or a link can send users to another site.
+- Tests never touch `db.sqlite3`: keep the autouse fixture in `tests/conftest.py`
+  (`db.configure(":memory:")`, `db.migrate()`, `yield`, `db.close_connections()`), so each test starts
+  with an empty database. `response.status` is an int; a refused `client.rpc(...)` raises `ServerError`.
 - Keep it in one language. Do not add JavaScript, a frontend framework, or a dependency for something
   the framework already does (auth, sessions, CSRF, admin, real time, styles are built in).
 

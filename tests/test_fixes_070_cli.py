@@ -280,3 +280,48 @@ def test_the_new_codes_are_catalogued_and_documented():
     for code in ("J214", "J515"):
         assert code in CATALOGUE and f"| `{code}` | {CATALOGUE[code]['title']} |" in GUIDE
     assert CATALOGUE["J214"]["title"] == "Host not allowed"
+
+
+def test_the_readme_testing_snippet_passes_against_the_readme_app(tmp_path):
+    """README's first app, its fixture and its test, run as written (the title used to be 'Jongo')."""
+    blocks = re.findall(r"```python\n(.*?)```", README, re.S)
+    (tmp_path / "app.py").write_text(blocks[0])
+    (tmp_path / "conftest.py").write_text(next(b for b in blocks if "def app():" in b))
+    (tmp_path / "tests").mkdir()
+    test_source = next(b for b in blocks if "def test_add(app)" in b)
+    (tmp_path / "tests" / "test_readme.py").write_text("from app import add_todo\n\n" + test_source)
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    for name in ("JONGO_DEV", "JONGO_ENV", "JONGO_DATABASE", "JONGO_APP"):
+        env.pop(name, None)
+    proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--rootdir",
+                           str(tmp_path), "tests"], cwd=tmp_path, capture_output=True, text=True, env=env,
+                          timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (tmp_path / "db.sqlite3").exists(), "the README's fixture must keep tests off db.sqlite3"
+
+
+def test_the_guide_names_help_as_the_field_option():
+    section = GUIDE[GUIDE.index("## 9. The database"):GUIDE.index("## 10. Migrations")]
+    assert "`help`" in section and "`help_text` is accepted as an alias" in section
+    assert "NO ACTION" in section
+
+
+def test_the_agent_surfaces_say_how_to_create_users_and_isolate_tests():
+    from jongo.introspect import RULES
+
+    scaffold = (PACKAGE / "scaffold" / "AGENTS.md.tmpl").read_text()
+    for text in (RULES, scaffold):
+        assert "User.create_user(username, password, **fields)" in text and "User.create(password=...)" in text
+        assert "login_url" in text and "(default `/login`)" in text and "is_local_url" in text
+        assert 'db.configure(":memory:")' in text
+    for text in (GUIDE, README):
+        assert 'db.configure(":memory:")' in text and "is_local_url" in text
+        for option in ("allowed_hosts", "frame_options", "max_form_fields", "max_form_parts", "MAX_CHANNELS",
+                       "MAX_CHANNEL_LENGTH", "J214", "UUID", "Decimal", "exclude="):
+            assert option in text, option
+
+
+def test_the_guide_lists_the_known_browser_limits():
+    section = GUIDE[GUIDE.index("## 18. What compiles to the browser"):GUIDE.index("## 19. When something")]
+    for needle in ("2⁵³", "insertion order", "generator expression", "`__name__`", "root="):
+        assert needle in section, needle
