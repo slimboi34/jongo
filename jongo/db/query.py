@@ -6,7 +6,7 @@ from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from . import connection
-from .fields import DateTime, Field, ForeignKey, ValidationError, utcnow
+from .fields import DateTime, Field, ForeignKey, ValidationError, int_out_of_range, utcnow
 from ..errors import Diagnostic
 
 
@@ -46,7 +46,21 @@ def integrity_to_validation(exc: Exception, model) -> "ValidationError | None":
         return ValidationError({name: f"{vn} with this {label} already exists."})
     if kind == "notnull":
         field = field_for(ref)
-        return ValidationError({(field.name if field else "__all__"): "This field is required."})
+        if field is not None:
+            return ValidationError({field.name: "This field is required."})
+        column = (ref or "").split(".")[-1].strip().strip('"')
+        if not column or column.lower() == "id":
+            return ValidationError({"__all__": "This field is required."})
+        # A column the model no longer declares (a field removed or renamed, and the old
+        # column kept because dropping it is destructive): every insert leaves it NULL.
+        error = ValidationError({"__all__": (
+            f'Column "{column}" is NOT NULL in the database but is not a field on {model.__name__} '
+            f"(left over from an earlier schema); run `jongo migrate --allow-destructive` to drop it, "
+            f"or make it nullable."
+        )})
+        error.hint = (f'Drop the leftover column with `jongo migrate --allow-destructive` (or add the field back '
+                      f'with null=True or a default) so inserts into "{meta.table}" stop failing.')
+        return error
     if kind == "foreign_key":  # sqlite doesn't name the column
         field = field_for(ref)
         fks = [f for f in meta.fields if isinstance(f, ForeignKey)]
@@ -195,7 +209,15 @@ def compile_lookup(model: type[Model], key: str, value: Any) -> tuple[str, list]
 
 
 NEVER_MATCHES = ("0 = 1", [])
+ALWAYS_MATCHES = ("1 = 1", [])
 _NUMERIC_KINDS = ("int", "float", "fk")
+
+
+class _OutOfRange:
+    """A lookup value beyond any INTEGER column: above every stored value (``sign`` 1) or below it (-1)."""
+
+    def __init__(self, sign: int):
+        self.sign = sign
 
 
 def _db_value(field: Field, value: Any) -> tuple[bool, Any]:
@@ -205,10 +227,15 @@ def _db_value(field: Field, value: Any) -> tuple[bool, Any]:
     numeric column compared against "not a number". SQLite compares those as text
     and simply matches nothing; PostgreSQL rejects the parameter outright, so the
     comparison is dropped here and both backends behave the same.
+
+    Returns ``(False, _OutOfRange)`` for an integer no INTEGER column can hold (the
+    driver would raise ``OverflowError``): equal to no row, above or below every one.
     """
     converted = field.to_db(value)
     if field.kind in _NUMERIC_KINDS and isinstance(converted, str):
         return False, None
+    if field.kind in ("int", "fk") and int_out_of_range(converted):
+        return False, _OutOfRange(1 if converted > 0 else -1)
     return True, converted
 
 
@@ -223,17 +250,29 @@ def _condition(field: Field, lookup: str, value: Any) -> tuple[str, list]:
         if value is None:
             return connection.dialect().not_equal(column), [None]
         ok, converted = _db_value(field, value)
-        return (connection.dialect().not_equal(column), [converted]) if ok else (f"{column} IS NOT NULL", [])
+        if ok:
+            return connection.dialect().not_equal(column), [converted]
+        if isinstance(converted, _OutOfRange):
+            return ALWAYS_MATCHES  # NULL rows too, as ne=<any other value> includes them
+        return f"{column} IS NOT NULL", []
     if lookup == "isnull":
         return (f"{column} IS NULL" if value else f"{column} IS NOT NULL"), []
     if lookup in COMPARISONS:
         ok, converted = _db_value(field, value)
-        return (f"{column} {COMPARISONS[lookup]} ?", [converted]) if ok else NEVER_MATCHES
+        if ok:
+            return f"{column} {COMPARISONS[lookup]} ?", [converted]
+        if isinstance(converted, _OutOfRange) and (lookup in ("lt", "lte")) == (converted.sign > 0):
+            return f"{column} IS NOT NULL", []  # every stored integer is below (or above) the bound
+        return NEVER_MATCHES
     if lookup == "in":
         return _in_condition(field, column, value)
     if value is None and lookup == "iexact":
         return f"{column} IS NULL", []
     text = value if isinstance(value, str) else str(field.to_db(value))
+    if "\x00" in text:
+        # SQLite's LIKE/GLOB stop at a NUL, so "a\x00zzz" would match like "a" (or every row);
+        # PostgreSQL can't store NUL in text at all. A NUL term matches nothing on either.
+        return NEVER_MATCHES
     return connection.dialect().text_condition(column, lookup, text)
 
 
@@ -244,7 +283,9 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
         raise TypeError(f'The "in" lookup expects a list, tuple, set or QuerySet, not {type(value).__name__}.')
     converted = [_db_value(field, item) for item in value]
-    values = [item for ok, item in converted if ok or item is None]
+    # Impossible candidates ("abc" for a number, an int beyond 64 bits) match no row, and must
+    # not turn into "IS NULL"; a None in the list arrives here as (True, None) and does.
+    values = [item for ok, item in converted if ok]
     if not values and converted:  # every candidate was an impossible value
         return NEVER_MATCHES
     present = [item for item in values if item is not None]

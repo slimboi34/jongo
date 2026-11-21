@@ -8,7 +8,7 @@ from datetime import date, datetime
 from typing import Any
 
 from . import connection
-from .fields import DateTime, Field, ForeignKey, Int, ValidationError, utcnow
+from .fields import INT_RANGE_MESSAGE, DateTime, Field, ForeignKey, Int, ValidationError, int_out_of_range, utcnow
 from ..errors import Diagnostic, coded
 from .query import (DoesNotExist, MultipleObjectsReturned, Q, QuerySet, integrity_error,
                     integrity_to_validation, quote)
@@ -412,6 +412,8 @@ class Model(metaclass=ModelMeta):
         """Coerce and validate every field, check uniqueness, run ``clean()``."""
         meta = self._meta
         errors: dict[str, str] = {}
+        if int_out_of_range(self.pk):  # an explicit id beyond 64 bits would reach the driver as an OverflowError
+            errors["id"] = INT_RANGE_MESSAGE
         for field in meta.fields:
             try:
                 value = field.coerce(self.__dict__.get(field.attname))

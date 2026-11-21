@@ -13,7 +13,7 @@ from . import connection
 from .fields import DateTime, Field, ForeignKey, utcnow
 from .models import Model, models_registry
 from .query import quote
-from ..errors import Diagnostic
+from ..errors import Diagnostic, hint_for
 
 ZERO_VALUES = {"text": "''", "int": "0", "float": "0.0", "bool": "0", "datetime": "''", "date": "''", "json": "'null'"}
 
@@ -91,6 +91,10 @@ class Operation:
     rebuild: bool = False
     column: str | None = None
     reasons: list[str] = dataclass_field(default_factory=list)
+    #: SQLite only: why the change would leave values unconverted (rows that hold "abc" in a
+    #: column becoming INTEGER). Such an operation is destructive, and ``migrate()`` refuses it
+    #: with J303 unless ``allow_destructive``.
+    lossy: list[str] = dataclass_field(default_factory=list)
 
     def describe(self) -> str:
         return self.description
@@ -110,7 +114,12 @@ def model_columns(model: type[Model]) -> list[Column]:
             try:
                 target = field.related_model
             except LookupError as exc:
-                raise MigrationError(str(exc)) from None
+                # Still a MigrationError for callers that catch one, but it keeps the lookup's
+                # J310 and hint: "null=True or a default" (J303's advice) can't fix a missing model.
+                error = MigrationError(str(exc))
+                error.code = getattr(exc, "code", None) or "J310"
+                error.hint = getattr(exc, "hint", None) or hint_for(error.code)
+                raise error from None
             references = (target._meta.table, "id", field.on_delete)
         columns.append(Column(field.column, field.sql_type, notnull=not field.null, references=references))
     return columns
@@ -307,7 +316,7 @@ def plan_migrations(models: Iterable[type[Model]] | None = None) -> list[Operati
             if live_name is None:
                 operations.append(_create_table(model))
             else:
-                operations.extend(_TablePlanner(model, introspect(conn, live_name), tables).plan())
+                operations.extend(_TablePlanner(model, introspect(conn, live_name), tables, conn).plan())
     return operations
 
 
@@ -373,10 +382,12 @@ def _create_table(model: type[Model]) -> Operation:
 class _TablePlanner:
     """Plans the changes for one model whose table already exists."""
 
-    def __init__(self, model: type[Model], live: TableSchema, tables: dict[str, str]):
+    def __init__(self, model: type[Model], live: TableSchema, tables: dict[str, str], conn=None):
         self.model = model
         self.live = live
         self.tables = tables
+        self.conn = conn
+        self.lossy: list[str] = []
         self.table = model._meta.table
         self.want = model_columns(model)
         self.wanted_names = {column.name.lower() for column in self.want}
@@ -412,7 +423,15 @@ class _TablePlanner:
             if new.pk and not old.pk:
                 reasons.append(f"make {label} the primary key")
             elif _affinity(old.type) != _affinity(new.type):
-                reasons.append(f"change the type of {label} from {old.type or 'untyped'} to {new.type}")
+                reason = f"change the type of {label} from {old.type or 'untyped'} to {new.type}"
+                unconvertible = self._unconvertible(old, new)
+                if unconvertible:
+                    rows, ids = unconvertible
+                    reason += f" ({rows})"
+                    self.lossy.append(
+                        f"Cannot change {label} from {old.type or 'untyped'} to {new.type}: {rows}{ids}."
+                    )
+                reasons.append(reason)
             if not new.pk and old.notnull != new.notnull:
                 reasons.append(f"make {label} {'NOT NULL' if new.notnull else 'nullable'}")
             if not _same_reference(old.references, new.references):
@@ -433,6 +452,52 @@ class _TablePlanner:
                 if field is not None and not field.unique:
                     reasons.append(f"drop the UNIQUE constraint on {self._label(field.column)}")
         return reasons
+
+    def _unconvertible(self, old: Column, new: Column) -> tuple[str, str] | None:
+        """SQLite: the rows whose value a rebuild would keep unconverted, described.
+
+        Returns ``("2 rows hold a value that is not a whole number", " (ids 4, 9)")``, or
+        None when every value converts.
+
+        SQLite applies the new column's affinity on the copy and keeps whatever doesn't
+        convert as it is ("abc" stays text in an INTEGER column), where PostgreSQL refuses
+        the ALTER outright. The predicates mirror SQLite's affinity rules: a value survives
+        INTEGER if it is (or reads as) a whole number in 64 bits, REAL if it reads as a
+        number that a double holds exactly.
+        """
+        if self.conn is None or not connection.dialect().rebuilds_tables or not self.live.has_rows:
+            return None
+        target = _affinity(new.type)
+        column = quote(old.name)
+        if target == "INTEGER":
+            numeric = f"CAST({column} AS NUMERIC)"
+            survives = (
+                f"CASE typeof({column}) WHEN 'integer' THEN 1 "
+                f"WHEN 'real' THEN {column} = CAST({column} AS INTEGER) "
+                f"ELSE {column} = {numeric} AND (typeof({numeric}) = 'integer' "
+                f"OR {numeric} = CAST({numeric} AS INTEGER)) END"
+            )
+            what = "a whole number"
+        elif target == "REAL":
+            survives = f"{column} = CAST({column} AS REAL)"
+            what = "a number"
+        else:  # anything converts to TEXT
+            return None
+        table = quote(self.live.name)
+        where = f"{column} IS NOT NULL AND NOT COALESCE({survives}, 0)"
+        count = self.conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0]
+        if not count:
+            return None
+        ids = ""
+        pk = self.live.columns.get("id")
+        if pk is not None:
+            found = [str(row[0]) for row in self.conn.execute(
+                f"SELECT {quote(pk.name)} FROM {table} WHERE {where} ORDER BY {quote(pk.name)} LIMIT 3"
+            )]
+            more = ", ..." if count > len(found) else ""
+            ids = f" (id{'s' if len(found) > 1 else ''} {', '.join(found)}{more})" if found else ""
+        rows = "1 row holds" if count == 1 else f"{count} rows hold"
+        return f"{rows} a value that is not {what}", ids
 
     def _alter_operations(self) -> list[Operation]:
         """Native ALTERs for backends that can change a column in place (PostgreSQL)."""
@@ -540,7 +605,8 @@ class _TablePlanner:
             sources.append(source)
         sql = self._rebuild_sql(new_columns, targets, sources)
         description = f'Rebuild table "{self.table}" to {"; ".join(reasons)}'
-        return Operation("rebuild_table", self.table, sql, description, rebuild=True, reasons=reasons)
+        return Operation("rebuild_table", self.table, sql, description, rebuild=True, reasons=reasons,
+                         destructive=bool(self.lossy), lossy=list(self.lossy))
 
     @staticmethod
     def _retained(column: Column) -> Column:
@@ -557,10 +623,27 @@ class _TablePlanner:
                 f"INSERT INTO {quote(temp)} ({', '.join(map(quote, targets))}) "
                 f"SELECT {', '.join(sources)} FROM {quote(self.table)}"
             )
+        if any(column.pk for column in new_columns):  # the new table is AUTOINCREMENT
+            sql.extend(self._carry_sequence(temp))
         sql.append(f"DROP TABLE {quote(self.table)}")
         sql.append(f"ALTER TABLE {quote(temp)} RENAME TO {quote(self.table)}")
         sql.extend(self._indexes_after_rebuild({column.name.lower() for column in new_columns}))
         return sql
+
+    def _carry_sequence(self, temp: str) -> list[str]:
+        """Keep the AUTOINCREMENT high-water mark across the rebuild.
+
+        DROP TABLE deletes the old table's ``sqlite_sequence`` row and the new table's is
+        seeded from MAX(id) of the rows copied, so ids of deleted rows above that would be
+        handed out again. Give the new table the larger of the two (RENAME carries it over).
+        """
+        old, new = sql_literal(self.live.name), sql_literal(temp)
+        highest = f"(SELECT MAX(seq) FROM sqlite_sequence WHERE name = {old})"
+        return [
+            f"UPDATE sqlite_sequence SET seq = MAX(seq, COALESCE({highest}, 0)) WHERE name = {new}",
+            f"INSERT INTO sqlite_sequence (name, seq) SELECT {new}, {highest} "
+            f"WHERE {highest} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = {new})",
+        ]
 
     def _indexes_after_rebuild(self, column_names: set[str]) -> list[str]:
         desired = model_indexes(self.model)
@@ -629,8 +712,18 @@ def migrate(
     """Apply planned operations; returns ``(operation, applied)`` pairs.
 
     Destructive operations (dropping columns) are skipped unless ``allow_destructive``.
+    A type change that would keep some values unconverted (SQLite: ``"abc"`` in a column
+    becoming INTEGER; PostgreSQL refuses those itself) raises ``MigrationError`` (J303)
+    instead, since skipping it would leave the column's type behind the model's.
     """
     operations = plan_migrations(models)
+    lossy = [message for op in operations for message in op.lossy]
+    if lossy and not (allow_destructive or dry_run):
+        error = MigrationError(" ".join(lossy))
+        error.hint = ("Fix or clear those values first, or run `jongo migrate --allow-destructive` "
+                      "(migrate(allow_destructive=True)) to change the type anyway; the values that "
+                      "don't convert are kept as they are.")
+        raise error
     selected = [op for op in operations if allow_destructive or not op.destructive]
     if dry_run or not selected:
         return [(op, False) for op in operations]

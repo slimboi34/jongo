@@ -26,9 +26,17 @@ class _Nothing:
 
 NOTHING: Any = _Nothing()
 
-ON_DELETE_ACTIONS = ("CASCADE", "SET NULL", "RESTRICT")
+ON_DELETE_ACTIONS = ("CASCADE", "SET NULL", "RESTRICT", "NO ACTION")
 TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+#: What an INTEGER column holds: 64-bit signed on SQLite, BIGINT on PostgreSQL.
+INT_MIN, INT_MAX = -(2**63), 2**63 - 1
+INT_RANGE_MESSAGE = f"Enter a whole number between {INT_MIN} and {INT_MAX}."
+
+
+def int_out_of_range(value: Any) -> bool:
+    """True for an ``int`` (not a ``bool``) that no INTEGER column can hold."""
+    return isinstance(value, int) and not isinstance(value, bool) and not INT_MIN <= value <= INT_MAX
 
 
 class ValidationError(Diagnostic, Exception):
@@ -79,7 +87,12 @@ class Field:
         label: str | None = None,
         help: str | None = None,
         editable: bool = True,
+        help_text: str | None = None,
     ):
+        if help_text is not None:  # Django's spelling, accepted as an alias
+            if help is not None:
+                raise TypeError("Pass help= or help_text= (an alias for help=), not both.")
+            help = help_text
         self.default = default
         self.null = null
         self.unique = unique
@@ -113,6 +126,15 @@ class Field:
     @label.setter
     def label(self, value: str | None) -> None:
         self._label = value
+
+    @property
+    def help_text(self) -> str | None:
+        """Alias for ``help``."""
+        return self.help
+
+    @help_text.setter
+    def help_text(self, value: str | None) -> None:
+        self.help = value
 
     @property
     def required(self) -> bool:
@@ -268,6 +290,11 @@ class Int(Field):
             self.fail("Enter a whole number.")
         return int(number)
 
+    def validate(self, value: Any) -> None:
+        super().validate(value)
+        if int_out_of_range(value):  # the driver would raise OverflowError (a 500) on the write
+            self.fail(INT_RANGE_MESSAGE)
+
 
 class Float(Field):
     sql_type = "REAL"
@@ -280,12 +307,19 @@ class Float(Field):
             number = float(value)
         except (TypeError, ValueError):
             return value
+        except OverflowError:  # an int beyond any float, e.g. 10**400
+            number = math.inf
         if not math.isfinite(number):  # SQLite stores NaN as NULL and can't round-trip inf reliably
             self.fail("Enter a finite number (not NaN or infinity).")
         return number
 
     def to_python(self, value: Any) -> Any:
-        return None if value is None else float(value)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):  # e.g. text left in the column by a type change: one bad
+            return value  # row must not make the whole table unreadable
 
     def parse(self, value: Any) -> Any:
         if value is None or _is_blank_string(value):
@@ -294,6 +328,8 @@ class Float(Field):
             return float(value.strip() if isinstance(value, str) else value)
         except (TypeError, ValueError):
             self.fail("Enter a number.")
+        except OverflowError:  # an int beyond any float, e.g. 10**400
+            self.fail("Enter a finite number (not NaN or infinity).")
 
 
 class Bool(Field):
@@ -344,6 +380,15 @@ def _parse_datetime_string(text: str) -> datetime:
     return datetime.fromisoformat(text)
 
 
+def _parse_date_string(text: str) -> date:
+    """``"2024-03-10"``, or a datetime string reduced to its date (an aware one's UTC date)."""
+    text = text.strip()
+    if len(text) > 10:
+        parsed = _parse_datetime_string(text)
+        return _to_utc(parsed).date() if parsed.tzinfo is not None else parsed.date()
+    return date.fromisoformat(text)
+
+
 class DateTime(Field):
     sql_type = "TEXT"
     kind = "datetime"
@@ -363,6 +408,13 @@ class DateTime(Field):
         # Normalise aware datetimes to UTC (so mixed offsets sort/range-compare chronologically)
         # while leaving naive datetimes naive, so each round-trips to an equal value of the same
         # kind. (Mixing naive and aware values in one column is the only case left unsorted.)
+        if isinstance(value, str):
+            # An ISO string (a query parameter, JSON) is the same instant as the datetime it
+            # names: compare it in the stored form, not as raw text. Unparseable text is kept.
+            try:
+                value = _parse_datetime_string(value)
+            except ValueError:
+                return value
         if isinstance(value, datetime):
             if value.tzinfo is not None:
                 value = value.astimezone(timezone.utc)
@@ -403,6 +455,11 @@ class Date(Field):
     kind = "date"
 
     def to_db(self, value: Any) -> Any:
+        if isinstance(value, str):
+            try:  # "2024-03-10", or a full datetime string, normalised as parse() would
+                value = _parse_date_string(value)
+            except ValueError:
+                return value
         if isinstance(value, datetime):
             return _to_utc(value).date().isoformat()  # UTC date, consistent with DateTime
         if isinstance(value, date):
@@ -427,12 +484,8 @@ class Date(Field):
         if isinstance(value, date):
             return value
         if isinstance(value, str):
-            text = value.strip()
             try:
-                if len(text) > 10:
-                    parsed = _parse_datetime_string(text)
-                    return (_to_utc(parsed).date() if parsed.tzinfo is not None else parsed.date())
-                return date.fromisoformat(text)
+                return _parse_date_string(value)
             except ValueError:
                 pass
         self.fail("Enter a valid date.")
@@ -443,7 +496,18 @@ class JSON(Field):
     kind = "json"
 
     def to_db(self, value: Any) -> Any:
-        return None if value is None else json.dumps(value)
+        return None if value is None else self._dumps(value)
+
+    def _dumps(self, value: Any) -> str:
+        """Strict JSON: NaN and Infinity are not JSON, so browsers and SQLite's json_valid() reject them."""
+        try:
+            return json.dumps(value, allow_nan=False)
+        except ValueError as exc:
+            if "JSON compliant" in str(exc):  # json's wording for an out-of-range float
+                self.fail("Enter finite numbers only (not NaN or infinity).")
+            self.fail("Value is not JSON serialisable.")
+        except TypeError:
+            self.fail("Value is not JSON serialisable.")
 
     def to_python(self, value: Any) -> Any:
         if value is None:
@@ -458,16 +522,13 @@ class JSON(Field):
             if not value.strip():
                 return None
             try:
-                return json.loads(value)
+                value = json.loads(value)  # accepts NaN/Infinity tokens, so check the result below
             except ValueError:
                 self.fail("Enter valid JSON.")
         return self.coerce(value)
 
     def coerce(self, value: Any) -> Any:
-        try:
-            json.dumps(value)
-        except (TypeError, ValueError):
-            self.fail("Value is not JSON serialisable.")
+        self._dumps(value)
         return value
 
     def validate(self, value: Any) -> None:
@@ -557,6 +618,11 @@ class ForeignKey(Field):
         if isinstance(value, str) and value.strip().isdigit():
             return int(value.strip())
         self.fail("Select a valid choice.")
+
+    def validate(self, value: Any) -> None:
+        super().validate(value)
+        if int_out_of_range(value):  # no row can have that id; the driver would raise OverflowError
+            self.fail("Select a valid choice; that id is out of range.")
 
     def clean(self, value: Any) -> Any:
         value = super().clean(value)
