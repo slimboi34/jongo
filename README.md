@@ -190,7 +190,7 @@ def rename(request, todo: Todo, title: str) -> dict:   # `todo: Todo` loads the 
 ```
 
 - **In a component**, call it with `await rename(todo_id, "New title")`. Keyword arguments work too.
-- **Arguments are validated** against the type hints before your code runs. Supported hints: `str`, `int`, `float`, `bool`, `list[...]`, `tuple[...]`, `set[...]`, `dict[...]`, `Optional` and unions, `Literal`, dataclasses, models, a `forms.Schema`, and (sent as strings) `date`, `datetime`, `time`, `UUID`, `Decimal`, `bytes` (base64) and `Enum`. Any other annotation is refused when the function is registered (`J405`).
+- **Arguments are validated** against the type hints before your code runs. Supported hints: `str`, `int`, `float`, `bool`, `list[...]`, `tuple[...]`, `set[...]`, `dict[...]`, `Optional` and unions, `Literal`, dataclasses, models, a `forms.Schema`, and (sent as strings) `date`, `datetime`, `time`, `UUID`, `Decimal`, `bytes` (base64) and `Enum`. Any other annotation is refused when the function is defined (`J405`); use `Any` to take any JSON.
 - **Return values** can be JSON-able data or UI elements (rendered in the browser), or a `redirect(url)` that navigates: a path on this site or an `http(s)` URL (a `javascript:` target is refused).
 - **Failures** raise `ServerError` in the browser, with `.status`, `.type` and field `.errors`.
 - **Options:** `@server(login_required=True)`, `@server(admin_required=True)`, `@server(refresh=True)` to re-run the page loader after each call, and `@server(rate_limit="5/minute")` to cap one caller (429 over the limit).
@@ -236,7 +236,7 @@ def SignupForm():
 
 - **One definition.** The schema is data, inlined into the bundle; `forms.validate` is Python the compiler turns into JavaScript. Messages are rendered once, in Python, and patterns are rewritten to syntax both regex engines read the same way, or refused when the schema is defined.
 - **The server never trusts the browser.** A `@server` parameter annotated with a schema is validated again and arrives cleaned: typed, stripped, and holding only the fields the schema declares.
-- **From a model:** `forms.Schema.from_model(Invite)` reads `max_length`, `choices` and types from the table. Pick fields with `only=[...]` or `exclude=[...]`; with neither, `is_admin`, `is_staff`, `is_superuser` and `password` are left out.
+- **From a model:** `forms.Schema.from_model(Invite)` reads `max_length`, `choices` and types from the table. Pick fields with `only=[...]` or `exclude=[...]`; `is_admin`, `is_staff`, `is_superuser` and `password` are left out unless `only=` names them.
 - **Checked, not asserted:** a test runs every rule against a table of awkward values in CPython and in the compiled bundle under Node, and requires identical answers.
 
 ## Real-time
@@ -372,7 +372,7 @@ app.admin()                                  # generated admin at /admin
 - **Rate limits:** `rate_limit="5/minute"` on `@server`, `@app.page` or `@app.route` caps one caller: every request counts against the client address and, when someone is signed in, against that user too, and either being over refuses it. `ratelimit.check(request, "3/hour", "reset", key=email)` for your own key. Counters are per process.
 - **Channel guards fail closed:** a guard must return `True` to allow a subscription; returning nothing refuses it.
 - **CSRF:** unsafe requests need a token. Browser code sends it automatically. Classic HTML forms need `input_(type="hidden", name="csrf_token", value=request.csrf_token)`. Cross-origin `Origin` headers are rejected.
-- **Host header:** `jongo dev` answers only requests addressed to `localhost`/`127.0.0.1` (others get a 400, `J214`), which stops DNS rebinding; `Jongo(allowed_hosts=["myapp.example.com"])` lists more names, and turns the check on in production.
+- **Host header:** `jongo dev` answers requests addressed to `localhost` or an IP address and refuses other host names (400, `J214`), which stops DNS rebinding; `Jongo(allowed_hosts=["myapp.example.com"])` lists more names (`".example.com"` takes subdomains too), and turns the check on in production.
 - **Framing:** pages carry `X-Frame-Options: SAMEORIGIN` (and `frame-ancestors 'self'` when there's no CSP); `Jongo(frame_options="DENY")` is stricter and `frame_options=None` opts out.
 - **Request limits:** bodies up to `Request.max_body_size` (16 MB) and forms up to `Request.max_form_fields` / `Request.max_form_parts` (1000 each); more is a 413 (`J212`) before anything is parsed.
 - **Redirects:** `is_local_url(url)` is true only for a path on this site; check user-supplied redirect targets with it.

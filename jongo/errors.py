@@ -343,7 +343,7 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J212": _e(
         "Malformed request body",
-        "The request body couldn't be read: it isn't valid JSON (or is nested too deeply), the "
+        "The request body couldn't be read: it isn't valid JSON, the "
         "Content-Length header is invalid, it is larger than the app's limit (Request.max_body_size), or "
         "a form has more fields or multipart parts than Request.max_form_fields / Request.max_form_parts "
         "allow (1000 each). Oversized bodies and forms are refused with a 413 before they are parsed.",
@@ -364,12 +364,14 @@ CATALOGUE: dict[str, dict] = {
     "J214": _e(
         "Host not allowed",
         "The request's Host header names a host the app doesn't answer for. Under `jongo dev` the app "
-        "answers only requests addressed to localhost, 127.0.0.1, ::1 or a *.localhost name, plus the "
-        "names in Jongo(allowed_hosts=[...]): a web page you visit can then not reach the dev server "
-        "through a domain it controls (DNS rebinding) and read the debug pages, the status endpoint or "
-        "call your server functions. In production the check applies only when allowed_hosts is set.",
-        "Open the app as http://localhost:PORT, or list the name it is reached by: "
-        "Jongo(__name__, allowed_hosts=[\"myapp.example.com\", \"192.168.1.20\"]).",
+        "answers requests addressed to localhost, a *.localhost name or an IP address, plus the names in "
+        "Jongo(allowed_hosts=[...]); any other name is refused, so a web page you visit can't reach the "
+        "dev server through a domain it controls (DNS rebinding) and read the debug pages, the status "
+        "endpoint or call your server functions. In production the check applies only when "
+        "allowed_hosts is set.",
+        "Open the app as http://localhost:PORT or by IP address, or list the name it is reached by "
+        "(a tunnel, a .local name): Jongo(__name__, allowed_hosts=[\"myapp.example.com\"]); "
+        "\".example.com\" also allows its subdomains.",
         "app = Jongo(__name__, allowed_hosts=[\"myapp.example.com\"])\n# Host: other.example -> 400 J214",
     ),
     # -- J3xx database ------------------------------------------------------------------------
@@ -464,11 +466,13 @@ CATALOGUE: dict[str, dict] = {
     "J405": _e(
         "Server function type hint can't be resolved",
         "A parameter annotation names a type Jongo can't find, or one it doesn't know how to check. "
-        "Without it the argument can't be validated, so the function refuses to run. The types it checks: "
-        "str, int, float, bool, None, list/tuple/set/dict, Optional and unions, Literal, dataclasses, "
-        "models, forms.Schema, date/datetime/time, UUID, Decimal, bytes (base64) and Enum.",
+        "Without it the argument can't be validated, so the function refuses to run; an annotation Jongo "
+        "can't check (Callable, a plain class, type[X]) is refused when the function is defined. The types "
+        "it checks: str, int, float, bool, None, list/tuple/set/dict, Optional and unions, Literal, "
+        "dataclasses, TypedDict, NewType, Annotated, models, forms.Schema, date/datetime/time, UUID, "
+        "Decimal, bytes (base64) and Enum.",
         "Define the annotated type (e.g. the model) at module level where the function can see it, annotate "
-        "with one of the checked types, or drop the annotation.",
+        "with one of the checked types, or use Any to take any JSON and check it yourself.",
     ),
     "J406": _e(
         "Two server functions share an id",

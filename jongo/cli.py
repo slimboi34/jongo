@@ -222,9 +222,9 @@ def cmd_dev(args):
     app = load_app(args.app)
     app.dev = True
     if args.host not in _LOCAL_HOSTS and not getattr(app, "allowed_hosts", None):
-        note("the dev server answers only requests addressed to localhost or 127.0.0.1; any other Host gets "
-             "a 400. To open it from another device, list the address it will be reached by in "
-             "Jongo(allowed_hosts=[...]).", error="J214")
+        note("the dev server answers requests addressed to localhost or an IP address; any other host name "
+             "gets a 400. To reach it by name from another device (a .local name, a tunnel), list that name "
+             "in Jongo(allowed_hosts=[...]).", error="J214")
     serve_or_die(app, args.host, args.port)
 
 

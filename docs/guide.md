@@ -152,8 +152,9 @@ def reports(request):
 - A page function may take `request` and/or its path parameters; take what you need.
 - Any other parameter is read from the query string and checked against its annotation:
   `page: int = 1` reads `?page=2`; a `bool` accepts `true`/`false`, `1`/`0`, `on`/`off` and
-  `yes`/`no` in any case; `list[int]` collects a repeated key (`?ids=1&ids=2`). A value that
-  doesn't fit is a 400 (`J211`), not an exception in your function.
+  `yes`/`no` in any case; `list[int]` collects a repeated key (`?ids=1&ids=2`); `date`,
+  `datetime`, `UUID`, `Decimal` and `Enum` arrive converted. A value that doesn't fit is a
+  400 (`J211`), not an exception in your function.
 - `@app.route(path, methods=("POST",))` registers a plain handler for forms, webhooks and
   files. Return a `Response`, a `str` of HTML, a `dict`/`list` (sent as JSON) or a UI tree.
 - `@app.get` and `@app.post` are shorthands.
@@ -314,11 +315,12 @@ updated = await rename(todo["id"], new_title)
 - **Arguments are checked against your type hints before your code runs.** A wrong type is
   a clean 400 (`J403`), not a crash inside your function. Supported: `str`, `int`, `float`,
   `bool`, `list[...]`, `tuple[...]`, `set[...]`, `dict[K, V]`, `None`-able types and unions,
-  `Literal[...]`, dataclasses, a `forms.Schema` ([§23](#23-form-schemas-one-set-of-rules-for-the-browser-and-the-server)),
+  `Literal[...]`, dataclasses, `TypedDict`, a `forms.Schema` ([§23](#23-form-schemas-one-set-of-rules-for-the-browser-and-the-server)),
   model classes, and, sent from the browser as strings, `date`, `datetime` and `time`
   (ISO 8601; a trailing `Z` is accepted), `UUID`, `Decimal` (finite values only), `bytes`
   (base64) and `Enum` members (by value). Any other annotation is refused when the function
-  is registered (`J405`), so no argument reaches your code unchecked.
+  is defined (`J405`), so no argument reaches your code unchecked; annotate a parameter
+  `Any` to take any JSON and check it yourself.
 - **A model parameter loads the row** by id, or returns 404 if it does not exist.
 - **`request` is always the first parameter**, with `request.user`, `request.session` and
   the rest.
@@ -625,13 +627,14 @@ What Jongo does by default:
 - **CSRF.** Every state-changing call carries a token signed with your secret and bound to
   the origin. Cross-origin `Origin` headers are rejected (scheme included), and the token is
   replaced at sign-in and sign-out.
-- **The Host header.** `jongo dev` answers only requests addressed to `localhost`,
-  `127.0.0.1`, `::1` or a `*.localhost` name; anything else gets a 400 (`J214`), so a page
-  you visit can't reach your dev server through a domain it controls (DNS rebinding) and
-  read the debug pages or call your server functions. To open the dev server from another
-  device, list the address: `Jongo(__name__, allowed_hosts=["192.168.1.20"])`. In production
-  the check applies only when `allowed_hosts` is set; set it unless a proxy in front already
-  checks `Host`.
+- **The Host header.** `jongo dev` answers requests addressed to `localhost`, a
+  `*.localhost` name or an IP address; any other host name gets a 400 (`J214`), so a page you
+  visit can't reach your dev server through a domain it controls (DNS rebinding) and read
+  the debug pages or call your server functions. To reach the dev server by a name (a
+  tunnel, `mymac.local`), list it: `Jongo(__name__, allowed_hosts=["mymac.local"])`;
+  `".example.com"` or `"*.example.com"` also allows subdomains. In production the check
+  applies only when `allowed_hosts` is set; set it unless a proxy in front already checks
+  `Host`.
 - **Framing.** Pages are sent with `X-Frame-Options: SAMEORIGIN` and, when the response has
   no `Content-Security-Policy` of its own, `frame-ancestors 'self'`, so another site can't
   load them in an invisible frame (clickjacking). `Jongo(frame_options="DENY")` forbids
@@ -803,9 +806,10 @@ system, and modules that only exist on the server.
 
 Tuples are real tuples — `(1, 2) != [1, 2]`, immutable, and `enumerate`/`zip`/`.items()`
 yield them — and strings are measured and indexed in code points, so `len("😀")` is 1.
-Errors are Python's too: dividing by zero raises `ZeroDivisionError`, ordering a list against
-`None` raises `TypeError`, and `float("")` raises `ValueError`. All of this is checked by a
-parity suite that runs every sample in CPython and in Node and compares the results.
+Errors are Python's too: `/`, `//`, `%` and `**` by zero raise `ZeroDivisionError`, ordering
+`None` or mixed types (`None < 1`, `"a" < 1`) raises `TypeError`, and `float("")` raises
+`ValueError`. All of this is checked by a parity suite that runs every sample in CPython and
+in Node and compares the results.
 
 **One limit that isn't about the browser:** the first argument to `Jongo()` should be
 `__name__`, or pass `root=`. The app finds its database file, `.jongo/secret` and `static/`
@@ -1017,7 +1021,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J211` | Query parameter has the wrong type | Fix the link or form that builds the URL, or give the parameter a type that accepts the value (str, Optional[int]) and handle it in the function. |
 | `J212` | Malformed request body | Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for larger uploads raise jongo.Request.max_body_size (16 MB by default), for bigger forms Request.max_form_fields / max_form_parts. |
 | `J213` | Too many requests (rate limit) | Wait for the Retry-After seconds. If the limit is too tight, raise it where it is set (rate_limit="30/minute", or jongo.auth.LOGIN_ATTEMPTS / LOGIN_WINDOW for sign-in). |
-| `J214` | Host not allowed | Open the app as http://localhost:PORT, or list the name it is reached by: Jongo(__name__, allowed_hosts=["myapp.example.com", "192.168.1.20"]). |
+| `J214` | Host not allowed | Open the app as http://localhost:PORT or by IP address, or list the name it is reached by (a tunnel, a .local name): Jongo(__name__, allowed_hosts=["myapp.example.com"]); ".example.com" also allows its subdomains. |
 
 **Database, models and migrations**
 
@@ -1043,7 +1047,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J402` | Malformed server function call | Call server functions from browser code with await fn(...), or from tests with client.rpc(fn, ...). |
 | `J403` | Server function argument has the wrong type | Send the annotated type (convert in the browser: int(draft.value)), or change the annotation. |
 | `J404` | Server function arguments don't match its signature | Call it with the parameters in its signature (`jongo context` lists every signature). |
-| `J405` | Server function type hint can't be resolved | Define the annotated type (e.g. the model) at module level where the function can see it, annotate with one of the checked types, or drop the annotation. |
+| `J405` | Server function type hint can't be resolved | Define the annotated type (e.g. the model) at module level where the function can see it, annotate with one of the checked types, or use Any to take any JSON and check it yourself. |
 | `J406` | Two server functions share an id | Move them to module level, or give each a distinct name. |
 | `J407` | Server function raised an exception | Read the traceback in the log or `jongo status`; raise NotFound/Forbidden/ValidationError for errors the browser may read. |
 | `J408` | Server function returned an unsupported response | Return JSON-able data, or redirect(url) to a path on this site (check user-supplied targets with jongo.is_local_url) or an http(s) URL. |
@@ -1137,10 +1141,10 @@ def SignupForm():
 
 `forms.Schema.from_model(Invite, only=..., exclude=...)` builds a schema from a model's
 fields (`max_length`, `choices`, `blank`, the type), so the form can't drift from the table.
-`only=[...]` keeps just the fields named and `exclude=[...]` drops some. With neither, fields
-that should never come from a form (`is_admin`, `is_staff`, `is_superuser`, `password`) are
-left out, and `jongo dev` logs that they were; name one in `only=` if a form really should
-set it.
+`only=[...]` keeps just the fields named and `exclude=[...]` drops some. Fields that should
+never come from a form (`is_admin`, `is_staff`, `is_superuser`, `password`) are left out
+unless `only=` names them, with a warning outside production; name one in `only=` if a form
+really should set it.
 
 **Using a schema.**
 
@@ -1205,8 +1209,11 @@ def report(): ...
 ```
 
 Each request counts against the client address and, when someone is signed in, against that
-user as well; it is refused when either count is over the limit. So signing up a fresh account
-for every request, or switching accounts, doesn't reset the address's count. Over the limit
+user as well; it is refused when either count is over the limit (and then neither is charged).
+So signing up a fresh account for every request, or switching accounts, doesn't reset the
+address's count. Many signed-in users behind one address (an office, a proxy without
+`trust_proxy=True`) share its count: raise `ratelimit.ADDRESS_FACTOR` (default `1`) to give the
+address a multiple of the limit, or set it to `None` to count signed-in users per user only. Over the limit
 the function doesn't run: the response is `429` with a `Retry-After` header and the code
 `J213`. Rates are written `"5/minute"`, `"100/hour"`, `"3/s"`, `"10 per 30 seconds"`
 or as a `(count, seconds)` pair; a rate that can't be read fails when the function is
