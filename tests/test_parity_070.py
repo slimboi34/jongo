@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 import unicodedata
 
 import pytest
@@ -46,6 +47,24 @@ def s_pow_mod_and_invert():
 def s_sum_compensated():
     return [sum([0.1, 0.2, 0.3]), sum([0.1] * 10), sum([1e16, 1.0, -1e16]), f"{sum([19.99, 5.01, 0.1])}",
             sum([1, 2, 3]), sum([[1], [2]], []), sum([0.5, 0.25], 1)]
+
+
+#: What a sample returns on CPython 3.12+, where the host Python is older and differs. The
+#: browser runtime follows 3.12+: sum() of floats there uses compensated summation, and 3.10
+#: and 3.11 (still supported, and in CI) add naively.
+SINCE_312 = {"s_sum_compensated": [0.6, 1.0, 1.0, "25.099999999999998", 6, [1, 2], 1.75]}
+
+
+def python_expects(name, fn):
+    if sys.version_info < (3, 12) and name in SINCE_312:
+        return SINCE_312[name]
+    return fn()
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="checks the recorded 3.12+ results against 3.12+")
+def test_the_recorded_312_results_are_what_312_returns():
+    for name, recorded in SINCE_312.items():
+        assert globals()[name]() == recorded, name
 
 
 def s_round_large():
@@ -377,7 +396,7 @@ def test_python_and_javascript_agree(tmp_path):
     results = run_in_node(SAMPLES, tmp_path)
     mismatches = []
     for name, fn in SAMPLES.items():
-        expected = normalise(fn())
+        expected = normalise(python_expects(name, fn))
         got = results[name]
         if got.get("error") or got.get("ok") != expected:
             mismatches.append(f"{name}:\n  python: {expected}\n  js:     {got}")
