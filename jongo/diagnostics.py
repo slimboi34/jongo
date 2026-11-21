@@ -63,9 +63,9 @@ def environment_checks(port: int | None = None) -> list[dict]:
             out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=5).stdout.strip()
         except Exception:
             out = "unknown version"
-        checks.append(check_result("node", "ok", f"node {out} found (only Jongo's own parity tests use it)"))
+        checks.append(check_result("node", "ok", f"node {out} found: start-up and `jongo check` parse the compiled bundle with it"))
     else:
-        checks.append(check_result("node", "ok", "node not found — not needed: Jongo compiles components itself"))
+        checks.append(check_result("node", "ok", "node not found — not needed: Jongo compiles components itself (with node, the bundle is also syntax-checked)"))
     return checks
 
 
