@@ -4,7 +4,9 @@ Each section is one confirmed finding from the 0.6.0 stress test:
 
 1. A look-alike account ("Ann") could clear the login throttle of "ann".
 2. rate_limit= counted a signed-in caller by user only, so a sign-up loop never got a 429.
+3. @server arguments typed date/datetime/time/UUID/Decimal/bytes/Enum arrived unchecked.
 4. User.create(password=...) and assign-then-save stored the raw password.
+5. The OpenAPI body required `kwargs`, but the browser sends `args`.
 6. Filling the shared limiter with fresh keys evicted a throttled caller's count.
 7. login()/logout() kept the CSRF token minted before sign-in.
 8. A user with no password answered a wrong guess ~1000x faster than an unknown username.
@@ -12,19 +14,33 @@ Each section is one confirmed finding from the 0.6.0 stress test:
 """
 from __future__ import annotations
 
+import base64
+import collections.abc
+import dataclasses
+import datetime
+import decimal
+import enum
+import importlib.util
+import inspect
 import os
+import re
 import subprocess
 import sys
 import textwrap
 import time
+import typing
+import uuid
 from pathlib import Path
+from typing import Annotated, Any, Literal, NewType, Optional, TypedDict, Union
 
 import pytest
 
 from conftest import sqlite_only, use_test_database
-from jongo import HTTPError, Jongo, auth, db, ratelimit, rpc, server
+from jongo import HTTPError, Jongo, JongoError, auth, db, forms, json_schema, ratelimit, rpc, server
 from jongo.http import CSRF_COOKIE, Request
 from jongo.ratelimit import Limiter, RateLimit, TooManyRequests
+from jongo.rpc import coerce
+from jongo.schema import function_schema, openapi
 from jongo.testing import TestClient
 
 HERE = Path(__file__).parent
@@ -210,6 +226,365 @@ def test_client_keys_and_an_explicit_key():
         "with key= only that key is counted"
 
 
+# =============================================== 3. typed @server arguments are checked ==
+
+
+class Plan(enum.Enum):
+    FREE = "free"
+    TEAM = "team"
+
+
+class Level(enum.IntEnum):
+    LOW = 1
+    HIGH = 2
+
+
+class Address(TypedDict):
+    street: str
+    number: int
+
+
+class PartialAddress(TypedDict, total=False):
+    street: str
+
+
+UserId = NewType("UserId", int)
+
+
+@dataclasses.dataclass
+class Slot:
+    day: datetime.date
+    plan: Plan = Plan.FREE
+
+
+class Unknown:
+    """A class Jongo has no rule for."""
+
+
+@dataclasses.dataclass
+class Tree:
+    label: str
+    children: list[Tree] = dataclasses.field(default_factory=list)
+
+
+def register(name, **annotations):
+    """@server on a function whose annotations are real objects (this module's are strings)."""
+    def fn(request, **kwargs):
+        return None
+
+    params = [inspect.Parameter("request", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    params += [inspect.Parameter(key, inspect.Parameter.POSITIONAL_OR_KEYWORD) for key in annotations]
+    fn.__signature__ = inspect.Signature(params)
+    fn.__annotations__ = dict(annotations)
+    fn.__name__ = fn.__qualname__ = name
+    return server(fn)
+
+
+def test_dates_times_uuids_decimals_bytes_and_enums_arrive_converted():
+    app = make_app()
+    seen = {}
+
+    @server
+    def typed(request, day: datetime.date, at: datetime.datetime, alarm: datetime.time, key: uuid.UUID,
+              amount: decimal.Decimal, blob: bytes, plan: Plan, level: Level) -> bool:
+        seen.update(day=day, at=at, alarm=alarm, key=key, amount=amount, blob=blob, plan=plan, level=level)
+        return True
+
+    client = TestClient(app)
+    key = "12345678-1234-5678-1234-567812345678"
+    assert client.rpc(typed, "2026-11-21", "2026-11-21T09:30:00.123Z", "07:15", key, "19.99",
+                      base64.b64encode(b"\x00hi").decode(), "team", 2) is True
+    assert seen == {
+        "day": datetime.date(2026, 11, 21),
+        "at": datetime.datetime(2026, 11, 21, 9, 30, 0, 123000, tzinfo=datetime.timezone.utc),
+        "alarm": datetime.time(7, 15), "key": uuid.UUID(key), "amount": decimal.Decimal("19.99"),
+        "blob": b"\x00hi", "plan": Plan.TEAM, "level": Level.HIGH,
+    }
+    assert type(seen["at"]) is datetime.datetime and type(seen["day"]) is datetime.date
+
+
+@pytest.mark.parametrize("hint, bad", [
+    (datetime.date, {"evil": True}), (datetime.date, "2026-13-45"), (datetime.date, "21/11/2026"),
+    (datetime.date, "2026-11-21T09:00:00"), (datetime.date, 20261121),
+    (datetime.datetime, "2026-11-21"), (datetime.datetime, "yesterday"), (datetime.datetime, 1700000000),
+    (datetime.datetime, "2026-11-21T25:00:00Z"),
+    (datetime.time, "25:00"), (datetime.time, "noon"), (datetime.time, 9),
+    (uuid.UUID, [1, 2, 3]), (uuid.UUID, "not-a-uuid"), (uuid.UUID, 12345),
+    (decimal.Decimal, "abc"), (decimal.Decimal, "NaN"), (decimal.Decimal, "Infinity"), (decimal.Decimal, True),
+    (decimal.Decimal, float("nan")), (decimal.Decimal, float("inf")), (decimal.Decimal, [5]),
+    (decimal.Decimal, "1e99999"), (decimal.Decimal, "1_000"),
+    (bytes, "not base64!"), (bytes, "aGk"), (bytes, 5), (bytes, ["aGk="]),
+    (Plan, "enterprise"), (Plan, "FREE"), (Plan, None), (Level, True), (Level, 1.0), (Level, "1"),
+])
+def test_a_value_of_the_wrong_shape_is_a_400_j403(hint, bad):
+    with pytest.raises(HTTPError) as caught:
+        coerce(bad, hint, "v")
+    assert caught.value.status == 400 and caught.value.code == "J403"
+    assert caught.value.hint
+
+
+def test_iso_8601_variants_are_read_on_every_python():
+    utc = datetime.timezone.utc
+    assert coerce("2026-11-21T09:30:00Z", datetime.datetime) == datetime.datetime(2026, 11, 21, 9, 30, tzinfo=utc)
+    assert coerce("2026-11-21t09:30z", datetime.datetime) == datetime.datetime(2026, 11, 21, 9, 30, tzinfo=utc)
+    assert coerce("2026-11-21 09:30:00", datetime.datetime) == datetime.datetime(2026, 11, 21, 9, 30)
+    plus = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    assert coerce("2026-11-21T09:30:00.123456789+0530", datetime.datetime) == \
+        datetime.datetime(2026, 11, 21, 9, 30, 0, 123456, tzinfo=plus)
+    assert coerce("09:30:00.5Z", datetime.time) == datetime.time(9, 30, 0, 500000, tzinfo=utc)
+    assert coerce("2026-11-21", datetime.date) == datetime.date(2026, 11, 21)
+
+
+def test_decimals_come_from_text_or_numbers_without_binary_noise():
+    assert coerce(0.1, decimal.Decimal) == decimal.Decimal("0.1")
+    assert coerce(7, decimal.Decimal) == decimal.Decimal(7)
+    assert coerce(" 1.50 ", decimal.Decimal) == decimal.Decimal("1.50")
+    assert coerce("-2.5e3", decimal.Decimal) == decimal.Decimal("-2.5e3")
+    assert coerce("1e4300", decimal.Decimal) == decimal.Decimal("1e4300"), "the bound itself is allowed"
+
+
+def test_unions_prefer_the_exact_type_before_converting():
+    assert coerce("007", int | str) == "007"
+    assert coerce(7, int | str) == 7
+    assert coerce(2.0, int | float) == 2.0 and type(coerce(2.0, int | float)) is float
+    assert coerce(True, int | bool) is True
+    assert coerce("1.5", float | str) == "1.5"
+    assert coerce("2026-11-21", Optional[datetime.date]) == datetime.date(2026, 11, 21)
+    assert coerce(None, Optional[datetime.date]) is None
+    assert coerce("2026-11-21", Union[datetime.date, str]) == "2026-11-21", "text is exactly a str"
+    assert coerce("2026-11-21", Union[int, datetime.date]) == datetime.date(2026, 11, 21)
+    with pytest.raises(HTTPError):
+        coerce(2**63, int | str)
+
+
+def test_typeddicts_newtypes_annotated_and_abstract_containers_are_checked():
+    assert coerce({"street": "Main", "number": "12", "extra": 1}, Address) == {"street": "Main", "number": 12}
+    with pytest.raises(HTTPError) as caught:
+        coerce({"street": "Main"}, Address, "home")
+    assert "'number'" in caught.value.message
+    with pytest.raises(HTTPError):
+        coerce({"street": "Main", "number": "twelve"}, Address)
+    assert coerce({}, PartialAddress) == {}
+    assert coerce("5", UserId) == 5
+    assert coerce("2026-11-21", Annotated[datetime.date, "when"]) == datetime.date(2026, 11, 21)
+    assert coerce([1, "2"], collections.abc.MutableSequence[int]) == [1, 2]
+    assert coerce([1, 1], collections.abc.Set[int]) == frozenset({1})
+    assert coerce({"a": "1"}, collections.abc.MutableMapping[str, int]) == {"a": 1}
+    assert coerce({"day": "2026-11-21"}, Slot) == Slot(datetime.date(2026, 11, 21))
+
+
+def test_a_float_past_floats_range_is_a_400_not_a_500():
+    with pytest.raises(HTTPError) as caught:
+        coerce(10**400, float, "x")
+    assert caught.value.code == "J403"
+
+
+@dataclasses.dataclass
+class HasUnknown:
+    thing: Unknown
+
+
+def test_a_hint_jongo_cannot_check_is_refused_when_the_function_is_defined():
+    for hint in (Unknown, list[Unknown], dict[str, Unknown], Optional[Unknown], typing.Callable[[], int],
+                 type[int], tuple[int, Unknown], HasUnknown, set[HasUnknown]):
+        with pytest.raises(JongoError) as caught:
+            register("handler", thing=hint)
+        assert caught.value.code == "J405", hint
+        assert "can't check" in str(caught.value) and "thing" in str(caught.value) and caught.value.hint
+    assert not rpc.SERVER_FUNCTIONS, "a refused function is never registered"
+
+
+def test_a_refused_hint_names_the_part_that_cannot_be_checked():
+    with pytest.raises(JongoError) as caught:
+        register("handler", thing=dict[str, list[Unknown]])
+    assert "Unknown" in str(caught.value).split("(in")[0]
+
+
+def test_hints_that_already_worked_are_still_accepted():
+    class Gadget(db.Model):
+        name = db.Text(max_length=40)
+
+    Order070 = forms.Schema("Order070", qty=forms.Int(min=1))
+    assert Order070
+
+    @server
+    def fine(request, a: int, b: str = "", c: Optional[float] = None, d: list[dict[str, int]] = (),
+             e: Literal["x", "y"] = "x", f: Any = None, g: Gadget | None = None, h: Order070 = None,
+             i: Slot | None = None, j: Address | None = None, k: UserId = 0, n: Tree | None = None,
+             *rest: datetime.date, **more: decimal.Decimal) -> Unknown:   # the return hint is never checked
+        return None
+
+    @server
+    def untyped(request, anything, other=None):
+        return anything
+
+    assert fine.hints["a"] is int and untyped.hints == {}
+
+
+def test_a_forward_reference_is_checked_when_it_resolves(tmp_path):
+    """Names defined further down the module are checked on first use, not at decoration."""
+    source = textwrap.dedent('''
+        from __future__ import annotations
+        from jongo import server
+
+        @server
+        def later(request, thing: Thing) -> None: ...
+
+        @server
+        def fine_later(request, thing: Point) -> int:
+            return thing.x
+
+        class Thing:
+            pass
+
+        import dataclasses
+
+        @dataclasses.dataclass
+        class Point:
+            x: int
+    ''')
+    path = tmp_path / "forward_mod_070.py"
+    path.write_text(source)
+    spec = importlib.util.spec_from_file_location("forward_mod_070", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["forward_mod_070"] = module
+    try:
+        spec.loader.exec_module(module)                    # nothing raised: Thing didn't exist yet
+        assert module.fine_later.hints["thing"] is module.Point
+        with pytest.raises(JongoError) as caught:
+            module.later.hints
+        assert caught.value.code == "J405"
+    finally:
+        sys.modules.pop("forward_mod_070", None)
+
+
+def test_a_page_query_parameter_typed_date_arrives_as_a_date():
+    app = make_app()
+
+    @app.route("/day")
+    def day(request, when: datetime.date = None):
+        return {"type": type(when).__name__, "iso": when.isoformat() if when else None}
+
+    client = TestClient(app)
+    assert client.get("/day?when=2026-11-21").json() == {"type": "date", "iso": "2026-11-21"}
+    bad = client.get("/day?when=tomorrow")
+    assert bad.status == 400 and "tomorrow" in bad.text   # J211, rendered as the error page
+
+
+# The schema-vs-coerce table: every hint x every value. Whatever the schema accepts, coerce()
+# must accept too, and accept as the right Python type.
+
+_RFC3339_TIME = r"\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})"
+_TABLE_HINTS = {
+    "int": int, "float": float, "str": str, "bool": bool, "Optional[int]": Optional[int],
+    "Union[int,str]": Union[int, str], "Union[str,int]": Union[str, int], "list[int]": list[int],
+    "list[dict[str,int]]": list[dict[str, int]], "dict[str,int]": dict[str, int], "dict[int,str]": dict[int, str],
+    "tuple[int,str]": tuple[int, str], "tuple[int,...]": tuple[int, ...], "set[int]": set[int],
+    "frozenset[str]": frozenset[str], "Literal['a','b']": Literal["a", "b"], "Literal[1,2]": Literal[1, 2],
+    "Literal[True]": Literal[True], "Literal[None]": Literal[None], "date": datetime.date,
+    "datetime": datetime.datetime, "time": datetime.time, "uuid": uuid.UUID, "Decimal": decimal.Decimal,
+    "bytes": bytes, "Slot": Slot, "Plan": Plan, "Level": Level, "Address": Address, "UserId": UserId,
+    "None": type(None), "Any": Any, "list": list, "dict": dict, "tuple": tuple,
+    "Optional[list[int]]": Optional[list[int]], "dict[str,Optional[float]]": dict[str, Optional[float]],
+    "Optional[date]": Optional[datetime.date], "Sequence[int]": collections.abc.Sequence[int],
+    "dict[Plan,int]": dict[Plan, int],
+}
+_TABLE_VALUES = [
+    None, True, False, 0, 1, -1, 2, 1.0, 1.5, -0.0, 2**63, 2**63 - 1, -(2**63), 2**64, 1e300, "", "a", "b", "1",
+    " 7 ", "1.5", "x", "2024-01-02", "2024-13-45", "2024-01-02T03:04:05", "2024-01-02T03:04:05Z",
+    "2024-01-02T03:04:05.5+05:30", "03:04:05Z", "03:04", "25:00:00Z", "12345678-1234-5678-1234-567812345678",
+    "not-a-uuid", "aGk=", "aGk", "free", "team", "FREE", [], [1], [1, 1], [1, "a"], [1.0, 1], ["a", "b"],
+    [1, 2, 3], [1, "x", 3], {}, {"a": 1}, {"1": "x"}, {"a": "x"}, {"a": None}, {"a": 1.5}, {"x": 1},
+    {"x": 1, "y": 2.5}, {"x": "1"}, {"y": 1}, {"free": 1}, {"street": "Main", "number": 1},
+    {"day": "2024-01-02"}, {"day": "2024-01-02", "plan": "team"}, {"day": "nope"}, [{"a": 1}], [None],
+]
+#: (hint, value) pairs where JSON Schema can't say what coerce() requires: integers must fit in
+#: 64 bits (SQLite's), and Literal/Enum values match by exact type, so 1.0 isn't 1.
+_KNOWN = {("int", 2**63), ("int", 2**64), ("int", 1e300), ("Optional[int]", 2**63), ("Optional[int]", 2**64),
+          ("Optional[int]", 1e300), ("Union[int,str]", 2**63), ("Union[int,str]", 2**64), ("Union[int,str]", 1e300),
+          ("Union[str,int]", 2**63), ("Union[str,int]", 2**64), ("Union[str,int]", 1e300), ("UserId", 2**63),
+          ("UserId", 2**64), ("UserId", 1e300), ("Literal[1,2]", 1.0), ("Level", 1.0)}
+_PYTHON_TYPE = {datetime.date: datetime.date, datetime.datetime: datetime.datetime, datetime.time: datetime.time,
+                uuid.UUID: uuid.UUID, decimal.Decimal: decimal.Decimal, bytes: bytes, Plan: Plan, Level: Level}
+
+
+def _strict_formats():
+    jsonschema = pytest.importorskip("jsonschema")
+    checker = jsonschema.FormatChecker()
+
+    @checker.checks("date-time", raises=ValueError)
+    def date_time(value):
+        if not isinstance(value, str):
+            return True
+        found = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[Tt](" + _RFC3339_TIME + ")", value)
+        if not found:
+            return False
+        datetime.date.fromisoformat(found.group(1))
+        return _time_ok(found.group(2))
+
+    @checker.checks("time", raises=ValueError)
+    def time_(value):
+        return not isinstance(value, str) or (re.fullmatch(_RFC3339_TIME, value) is not None and _time_ok(value))
+
+    return jsonschema, checker
+
+
+def _time_ok(text):
+    hours, minutes, seconds = int(text[0:2]), int(text[3:5]), int(text[6:8])
+    return hours < 24 and minutes < 60 and seconds < 60
+
+
+def test_the_schema_and_the_rpc_boundary_agree_on_every_pair():
+    jsonschema, checker = _strict_formats()
+    refused_but_valid, wrong_type = [], []
+    for label, hint in _TABLE_HINTS.items():
+        validator = jsonschema.Draft202012Validator(json_schema(hint), format_checker=checker)
+        for value in _TABLE_VALUES:
+            try:
+                result, accepted = coerce(value, hint, "v"), True
+            except HTTPError:
+                result, accepted = None, False
+            if validator.is_valid(value) and not accepted and (label, value) not in _KNOWN:
+                refused_but_valid.append((label, value))
+            expected = _PYTHON_TYPE.get(hint)
+            if accepted and expected is not None and type(result) is not expected:
+                wrong_type.append((label, value, type(result).__name__))
+    assert len(_TABLE_HINTS) * len(_TABLE_VALUES) >= 1768       # at least the stress test's table
+    assert refused_but_valid == [], "a value the schema allows must reach the function"
+    assert wrong_type == [], "an accepted value arrives as the annotated type"
+
+
+def test_the_new_types_refuse_what_their_schema_refuses():
+    """The other direction, for the types this release starts checking (Decimal also reads text)."""
+    jsonschema, checker = _strict_formats()
+    lenient = []
+    for hint in (datetime.date, datetime.datetime, datetime.time, uuid.UUID, decimal.Decimal, bytes, Plan, Level):
+        validator = jsonschema.Draft202012Validator(json_schema(hint), format_checker=checker)
+        for value in _TABLE_VALUES:
+            try:
+                coerce(value, hint, "v")
+            except HTTPError:
+                continue
+            if not validator.is_valid(value):
+                lenient.append((hint.__name__, value))
+    allowed = {("Decimal", "1"), ("Decimal", " 7 "), ("Decimal", "1.5"), ("datetime", "2024-01-02T03:04:05"),
+               ("time", "03:04")}
+    assert set(lenient) <= allowed, set(lenient) - allowed
+
+
+def test_schemas_for_the_new_types_describe_what_coerce_reads():
+    assert json_schema(Plan) == {"title": "Plan", "enum": ["free", "team"]}
+    assert json_schema(Level) == {"title": "Level", "enum": [1, 2]}
+    assert json_schema(UserId) == {"type": "integer"}
+    assert json_schema(Address) == {"type": "object", "title": "Address", "required": ["street", "number"],
+                                    "properties": {"street": {"type": "string"}, "number": {"type": "integer"}}}
+    assert json_schema(dict[int, str])["propertyNames"] == {"pattern": "^\\s*-?[0-9]+\\s*$"}
+    assert json_schema(dict[Plan, int])["propertyNames"] == {"title": "Plan", "enum": ["free", "team"]}
+    assert "pattern" in json_schema(bytes) and json_schema(bytes)["contentEncoding"] == "base64"
+    assert json_schema(collections.abc.MutableSet[int]) == {"type": "array", "items": {"type": "integer"},
+                                                            "uniqueItems": True}
+
+
 # =============================================================== 4. passwords are hashed ==
 
 
@@ -275,6 +650,94 @@ def test_editing_a_user_in_the_admin_keeps_the_stored_hash():
     response = client.post(f"/admin/user/{bob.id}", data=form)
     assert response.status == 303, response.text
     assert auth.User.get(id=bob.id).name == "Bob" and auth.authenticate("bob", "bob-pw").id == bob.id
+
+
+# ======================================================= 5. the OpenAPI body matches calls ==
+
+
+def body_app():
+    app = make_app()
+
+    @server
+    def add_item(request, name: str, price: float, tags: list[str] = (), *, note: str = "") -> dict:
+        return {"name": name, "price": price, "tags": list(tags), "note": note}
+
+    @server
+    def strict(request, a: int, /, b: int, *, c: int) -> int:
+        return a + b + c
+
+    @server
+    def optional_only(request, n: int = 1) -> int:
+        return n
+
+    @server
+    def spread(*values: int, **named: str) -> int:
+        return len(values) + len(named)
+
+    app.fns = dict(add_item=add_item, strict=strict, optional_only=optional_only, spread=spread)
+    return app
+
+
+def _body(app, fn):
+    operation = openapi(app)["paths"][f"/_jongo/rpc/{fn.id}"]["post"]
+    return operation["requestBody"], operation["requestBody"]["content"]["application/json"]["schema"]
+
+
+def test_the_request_body_describes_args_and_kwargs_without_requiring_either():
+    app = body_app()
+    request_body, body = _body(app, app.fns["add_item"])
+    assert request_body["required"] is True
+    assert "required" not in body
+    args, kwargs = body["properties"]["args"], body["properties"]["kwargs"]
+    assert [item["type"] for item in args["prefixItems"]] == ["string", "number", "array"]
+    assert args["maxItems"] == 3 and "note" not in str(args["prefixItems"]), "keyword-only can't go by position"
+    assert "required" not in kwargs and set(kwargs["properties"]) == {"name", "price", "tags", "note"}
+    assert [(s.get("properties", {}).get("args", {}).get("minItems", 0),
+             s.get("properties", {}).get("kwargs", {}).get("required", [])) for s in body["anyOf"]] == [
+        (0, ["name", "price"]), (1, ["price"]), (2, [])]
+    assert function_schema(app.fns["add_item"])["required"] == ["name", "price"], "the MCP inputSchema is unchanged"
+
+    _, strict = _body(app, app.fns["strict"])
+    assert "a" not in strict["properties"]["kwargs"]["properties"], "positional-only can't go by name"
+    assert [s["properties"]["args"]["minItems"] for s in strict["anyOf"]] == [1, 2]
+    assert all(s["properties"]["kwargs"]["required"][-1] == "c" for s in strict["anyOf"])
+
+    request_body, optional = _body(app, app.fns["optional_only"])
+    assert request_body["required"] is False and "anyOf" not in optional, "an empty body is a valid call"
+    _, spread = _body(app, app.fns["spread"])
+    assert spread["properties"]["args"]["items"] == {"type": "integer"} and "maxItems" not in spread["properties"]["args"]
+    assert spread["properties"]["kwargs"]["additionalProperties"] is True
+
+
+@pytest.mark.parametrize("fn, payload, ok", [
+    ("add_item", {"args": ["Lamp", 9.5], "kwargs": {}}, True),                    # what the browser sends
+    ("add_item", {"args": ["Lamp", 9.5]}, True),
+    ("add_item", {"kwargs": {"name": "Lamp", "price": 9.5}}, True),               # by name only
+    ("add_item", {"args": ["Lamp"], "kwargs": {"price": 9.5, "note": "x"}}, True),  # mixed
+    ("add_item", {"args": ["Lamp", 9.5, ["a"]], "kwargs": {"note": "n"}}, True),
+    ("add_item", {}, False),
+    ("add_item", {"args": ["Lamp"]}, False),
+    ("add_item", {"kwargs": {"name": "Lamp"}}, False),
+    ("add_item", {"args": ["Lamp", 9.5, [], "extra"]}, False),
+    ("add_item", {"args": [3, 9.5]}, False),
+    ("add_item", {"kwargs": {"name": "Lamp", "price": 9.5, "colour": "red"}}, False),
+    ("strict", {"args": [1, 2], "kwargs": {"c": 3}}, True),
+    ("strict", {"args": [1], "kwargs": {"b": 2, "c": 3}}, True),
+    ("strict", {"kwargs": {"a": 1, "b": 2, "c": 3}}, False),
+    ("strict", {"args": [1, 2, 3]}, False),
+    ("optional_only", {}, True),
+    ("optional_only", {"args": [4]}, True),
+    ("spread", {"args": [1, 2, 3], "kwargs": {"x": "y"}}, True),
+    ("spread", {"args": ["one"]}, False),
+])
+def test_the_body_schema_accepts_exactly_the_calls_the_server_accepts(fn, payload, ok):
+    app = body_app()
+    function = app.fns[fn]
+    response = TestClient(app).post(f"/_jongo/rpc/{function.id}", json=payload)
+    assert (response.status == 200) is ok, response.text
+    jsonschema = pytest.importorskip("jsonschema")
+    _, body = _body(app, function)
+    assert jsonschema.Draft202012Validator(body).is_valid(payload) is ok
 
 
 # ================================================= 6. a flood never lifts a caller's block ==

@@ -19,6 +19,7 @@ import collections.abc
 import dataclasses
 import datetime
 import decimal
+import enum
 import inspect
 import json
 import sys
@@ -34,7 +35,8 @@ _PRIMITIVES = {
     int: {"type": "integer"},
     float: {"type": "number"},
     str: {"type": "string"},
-    bytes: {"type": "string", "contentEncoding": "base64"},
+    bytes: {"type": "string", "contentEncoding": "base64",
+            "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"},
     datetime.datetime: {"type": "string", "format": "date-time"},
     datetime.date: {"type": "string", "format": "date"},
     datetime.time: {"type": "string", "format": "time"},
@@ -42,7 +44,12 @@ _PRIMITIVES = {
     uuid.UUID: {"type": "string", "format": "uuid"},
 }
 _UNIONS = (typing.Union, getattr(types, "UnionType", typing.Union))
-_ARRAYS = (list, set, frozenset, collections.abc.Sequence, collections.abc.Iterable)
+_ARRAYS = (list, set, frozenset, collections.abc.Sequence, collections.abc.MutableSequence,
+           collections.abc.Iterable, collections.abc.Collection, collections.abc.Set, collections.abc.MutableSet)
+_SETS = (set, frozenset, collections.abc.Set, collections.abc.MutableSet)
+_MAPPINGS = (dict, collections.abc.Mapping, collections.abc.MutableMapping)
+#: An integer dict key, as JSON carries it (object keys are text) and coerce() reads it.
+_INT_KEY = {"pattern": "^\\s*-?[0-9]+\\s*$"}
 _CONVERTER_SCHEMAS = {
     "int": {"type": "integer"},
     "float": {"type": "number"},
@@ -57,16 +64,25 @@ def _is_model(hint) -> bool:
     return isinstance(hint, type) and hasattr(hint, "_meta") and hasattr(hint, "objects")
 
 
+def _is_typeddict(hint) -> bool:
+    return (isinstance(hint, type) and issubclass(hint, dict) and hasattr(hint, "__total__")
+            and hasattr(hint, "__annotations__"))
+
+
 def json_schema(hint, *, output: bool = False, models: dict | None = None) -> dict:
     """The JSON Schema (2020-12) for a Python type hint, as Jongo's ``@server`` boundary reads it.
 
     The mapping mirrors what :func:`jongo.rpc.coerce` accepts, so a value that satisfies
-    the schema is a value the function will receive.
+    the schema is a value the function will receive (two rules it doesn't spell out: an
+    integer must fit in 64 bits, and a ``Literal``/``Enum`` value must have the exact type,
+    so ``1.0`` isn't ``1``). ``coerce`` is more lenient in the other direction: it also
+    reads numbers sent as text.
 
     Parameters:
         hint: a type or annotation: ``int``, ``list[str]``, ``dict[str, float]``,
-            ``Optional[int]``, ``Literal["a", "b"]``, a dataclass, a ``db.Model`` class, or a
-            ``forms.Schema``.
+            ``Optional[int]``, ``Literal["a", "b"]``, ``date``/``datetime``/``time``, ``UUID``,
+            ``Decimal``, ``bytes``, an ``Enum``, a dataclass, a ``TypedDict``, a ``db.Model``
+            class, or a ``forms.Schema``.
         output: describe a *returned* value instead of an argument. It only changes
             models: an argument annotated with a model is the row's integer id, while a
             returned model is the object ``to_dict()`` produces.
@@ -89,8 +105,14 @@ def json_schema(hint, *, output: bool = False, models: dict | None = None) -> di
         return {}
     if getattr(hint, "__jongo_schema__", False):
         return form_schema(hint)
-    if hint in _PRIMITIVES:
-        return dict(_PRIMITIVES[hint])
+    for primitive, schema in _PRIMITIVES.items():
+        if hint is primitive:
+            return dict(schema)
+    if isinstance(hint, type) and issubclass(hint, enum.Enum):  # sent and checked by value
+        return {"title": hint.__name__, "enum": [member.value for member in hint]}
+    supertype = getattr(hint, "__supertype__", None)  # typing.NewType
+    if supertype is not None:
+        return json_schema(supertype, output=output, models=models)
     origin = typing.get_origin(hint)
     args = typing.get_args(hint)
     if origin in _UNIONS:
@@ -116,13 +138,17 @@ def json_schema(hint, *, output: bool = False, models: dict | None = None) -> di
         out: dict[str, Any] = {"type": "array"}
         if args:
             out["items"] = json_schema(args[0], output=output, models=models)
-        if container in (set, frozenset):
+        if container in _SETS:
             out["uniqueItems"] = True
         return out
-    if container in (dict, collections.abc.Mapping):
+    if container in _MAPPINGS:
         out = {"type": "object"}
-        if len(args) == 2 and args[1] is not typing.Any:
-            out["additionalProperties"] = json_schema(args[1], output=output, models=models)
+        if len(args) == 2:
+            keys = _key_schema(args[0])
+            if keys:
+                out["propertyNames"] = keys
+            if args[1] is not typing.Any:
+                out["additionalProperties"] = json_schema(args[1], output=output, models=models)
         return out
     if _is_model(hint):
         if not output:
@@ -145,7 +171,33 @@ def json_schema(hint, *, output: bool = False, models: dict | None = None) -> di
         if required:
             out["required"] = required
         return out
+    if _is_typeddict(hint):
+        try:
+            hints = typing.get_type_hints(hint)
+        except Exception:
+            hints = {}
+        keys = getattr(hint, "__required_keys__", None)
+        if keys is None:
+            keys = frozenset(hints) if hint.__total__ else frozenset()
+        out = {"type": "object", "title": hint.__name__,
+               "properties": {key: json_schema(value, output=output, models=models) for key, value in hints.items()}}
+        required = [key for key in hints if key in keys]
+        if required:
+            out["required"] = required
+        return out
     return {}
+
+
+def _key_schema(hint) -> dict | None:
+    """``propertyNames`` for a ``dict[K, V]``: what the keys (always text in JSON) must look like."""
+    if hint is int:
+        return dict(_INT_KEY)
+    if hint is str or hint is typing.Any or hint is object:
+        return None
+    schema = json_schema(hint)
+    if schema.get("type") == "string" or (schema.get("enum") and all(isinstance(v, str) for v in schema["enum"])):
+        return schema
+    return None
 
 
 def model_schema(model) -> dict:
@@ -366,6 +418,65 @@ def _rest_of_doc(obj) -> str | None:
     return rest or None
 
 
+def _request_body(sf, hints: dict) -> tuple[dict, bool]:
+    """The JSON body of a call to ``sf``, and whether a body is required at all.
+
+    The server binds ``{"args": [...], "kwargs": {...}}`` the way Python binds a call:
+    ``args`` fill the parameters in order and ``kwargs`` name the rest. The browser sends
+    its arguments in ``args``; another client may name them all in ``kwargs``, or mix the
+    two. So neither key is required on its own: the ``anyOf`` lists each way of covering
+    the required parameters (the first ``n`` by position, the rest by name).
+    """
+    by_name = function_schema(sf)
+    properties = by_name["properties"]
+    params = [(name, p) for name, p in sf.signature.parameters.items()
+              if not (name == "request" and sf.wants_request)]
+    positional = [name for name, p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    positional_only = {name for name, p in params if p.kind is p.POSITIONAL_ONLY}
+    star_args = next((name for name, p in params if p.kind is p.VAR_POSITIONAL), None)
+    # Parameters without a default come first among the positional ones, so they are a prefix.
+    leading = [name for name, p in params
+               if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty]
+    keyword_only = [name for name, p in params if p.kind is p.KEYWORD_ONLY and p.default is p.empty]
+
+    args: dict[str, Any] = {"type": "array",
+                            "description": "positional arguments, in order: " + (", ".join(positional) or "none")}
+    if positional:
+        args["prefixItems"] = [properties[name] for name in positional]
+    if star_args is not None:
+        items = json_schema(hints.get(star_args, typing.Any))
+        if items:
+            args["items"] = items
+    else:
+        args["maxItems"] = len(positional)
+    args["default"] = []
+    kwargs: dict[str, Any] = {
+        "type": "object", "description": "arguments by name",
+        "properties": {name: schema for name, schema in properties.items() if name not in positional_only},
+        "additionalProperties": by_name["additionalProperties"], "default": {},
+    }
+    body: dict[str, Any] = {"type": "object", "properties": {"args": args, "kwargs": kwargs}}
+
+    shapes = []
+    first = sum(1 for name in leading if name in positional_only)  # those can only go by position
+    for n in range(first, len(leading) + 1):
+        named = leading[n:] + keyword_only
+        shape: dict[str, Any] = {"properties": {}, "required": []}
+        if n:
+            shape["properties"]["args"] = {"minItems": n}
+            shape["required"].append("args")
+        if named:
+            shape["properties"]["kwargs"] = {"required": named}
+            shape["required"].append("kwargs")
+        shape["title"] = ("all by name" if not n else "all by position" if not named
+                          else f"the first {n} by position, the rest by name")
+        shapes.append(shape)
+    required = bool(leading or keyword_only)
+    if required:
+        body["anyOf"] = shapes
+    return body, required
+
+
 def openapi(app, *, version: str = "0.0.0", server_url: str | None = None) -> dict:
     """An OpenAPI 3.1 document for the app, generated from the running code.
 
@@ -414,19 +525,7 @@ def openapi(app, *, version: str = "0.0.0", server_url: str | None = None) -> di
             hints = sf.hints
         except Exception:
             hints = {}
-        kwargs = function_schema(sf)
-        positional = [name for name, p in sf.signature.parameters.items()
-                      if not (name == "request" and sf.wants_request)
-                      and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-        body = {
-            "type": "object",
-            "properties": {
-                "args": {"type": "array", "description": "positional arguments, in order: " +
-                                                         (", ".join(positional) or "none"),
-                         "maxItems": len(positional), "default": []},
-                "kwargs": {**kwargs, "description": "arguments by name"},
-            },
-        }
+        body, body_required = _request_body(sf, hints)
         result = {"type": "object", "properties": {"ok": json_schema(hints.get("return", typing.Any),
                                                                      output=True, models=models)}}
         responses = {
@@ -451,7 +550,7 @@ def openapi(app, *, version: str = "0.0.0", server_url: str | None = None) -> di
             "operationId": operation_id(sf.fn.__name__),
             "tags": ["server functions"],
             "summary": _first_line(sf.fn) or sf.fn.__name__,
-            "requestBody": {"required": bool(kwargs.get("required")),
+            "requestBody": {"required": body_required,
                             "content": {"application/json": {"schema": body}}},
             "responses": dict(sorted(responses.items())),
             "security": [{"csrf": [], "session": []}] if sf.login_required else [{"csrf": []}],
