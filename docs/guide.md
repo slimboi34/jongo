@@ -896,6 +896,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J211` | Query parameter has the wrong type | Fix the link or form that builds the URL, or give the parameter a type that accepts the value (str, Optional[int]) and handle it in the function. |
 | `J212` | Malformed request body | Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for larger uploads raise jongo.Request.max_body_size (16 MB by default). |
 | `J213` | Too many requests (rate limit) | Wait for the Retry-After seconds. If the limit is too tight, raise it where it is set (rate_limit="30/minute", or jongo.auth.LOGIN_ATTEMPTS / LOGIN_WINDOW for sign-in). |
+| `J214` | Host not allowed | Open the app as http://localhost:PORT, or list the name it is reached by: Jongo(__name__, allowed_hosts=["myapp.example.com", "192.168.1.20"]). |
 
 **Database, models and migrations**
 
@@ -940,7 +941,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J502` | Dev mode is on | Don't set JONGO_DEV=1 or dev=True in production; run with `jongo run`. |
 | `J503` | App file not found | Run the command inside the project, pass the file (jongo check path/to/app.py), or create one with `jongo new`. |
 | `J504` | No Jongo app in the module | Add app = Jongo(__name__) to the module, or name it: jongo check module:attr. |
-| `J505` | Port already in use | Use another port (--port 8001) or stop the other process. |
+| `J505` | Port in use, or the address can't be listened on | Use another port (--port 8001) or stop the other process; check --host (127.0.0.1 for this machine only, 0.0.0.0 for every interface). |
 | `J506` | Static directory missing | Create static/ next to app.py and put the files there. |
 | `J507` | Cookies won't be marked Secure behind a proxy | Behind a proxy you control, create the app with Jongo(..., trust_proxy=True). |
 | `J508` | Status endpoint refused | Set JONGO_STATUS_TOKEN on the server and run `jongo status --url ... --token $JONGO_STATUS_TOKEN`. |
@@ -950,6 +951,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J512` | Can't reach the running server | Start the app (`jongo dev`) and pass its address: jongo status --url http://127.0.0.1:8000 |
 | `J513` | Rate limit can't be read | Write it as "5/minute", "100/hour", "10 per 30 seconds", or a (count, seconds) pair. |
 | `J514` | MCP endpoint mounted but nobody can use it | Set JONGO_MCP_TOKEN to a long random value (python -c "import secrets; print(secrets.token_urlsafe(32))"), or remove app.mcp() from the production app. |
+| `J515` | Can't write the file or directory | Pass a path inside a directory that exists and that you can write to (create it first with mkdir -p), with a shorter name if the system says it is too long. |
 
 ---
 

@@ -57,9 +57,11 @@ class RateLimit:
     __slots__ = ("count", "seconds")
 
     def __init__(self, count: int, seconds: float):
-        if count < 1 or seconds <= 0:
-            raise JongoError(f"a rate limit needs a positive count and period, got {count} per {seconds}s",
-                             code="J513")
+        numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (count, seconds))
+        if not numbers or not 1 <= count < float("inf") or not 0 < seconds < float("inf"):
+            raise JongoError(f"a rate limit needs a positive count and period, got {count!r} calls per "
+                             f"{seconds!r} seconds", code="J513",
+                             hint='write it as "5/minute", or as a (count, seconds) pair of numbers: (5, 60)')
         self.count = int(count)
         self.seconds = float(seconds)
 

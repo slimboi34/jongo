@@ -1,0 +1,22 @@
+"""Tests for {{name}}. Run them with `pytest`; tests/conftest.py gives each one an empty database."""
+from jongo.testing import TestClient
+
+from app import Message, app, post_message
+
+
+def test_the_home_page_renders():
+    response = TestClient(app).get("/")
+    assert response.status == 200            # the status code, as an int
+    assert "Guestbook" in response.text      # rendered on the server, before any JavaScript
+
+
+def test_posting_a_message():
+    client = TestClient(app)
+    message = client.rpc(post_message, "Ann", "Hello")   # a real HTTP round trip, CSRF included
+    assert message["author"] == "Ann" and message["body"] == "Hello"
+    assert Message.count() == 1
+    assert "Hello" in client.get("/").text
+
+
+def test_each_test_starts_empty():
+    assert Message.count() == 0

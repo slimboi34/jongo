@@ -47,7 +47,7 @@ jongo = "jongo.cli:main"
 include = ["jongo*"]
 
 [tool.setuptools.package-data]
-jongo = ["compiler/*.js", "scaffold/*"]
+jongo = ["compiler/*.js", "scaffold/*", "scaffold/tests/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

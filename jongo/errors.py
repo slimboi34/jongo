@@ -358,6 +358,17 @@ CATALOGUE: dict[str, dict] = {
         "(rate_limit=\"30/minute\", or jongo.auth.LOGIN_ATTEMPTS / LOGIN_WINDOW for sign-in).",
         "@server(rate_limit=\"5/minute\")\ndef send_invite(request, email: str) -> dict: ...",
     ),
+    "J214": _e(
+        "Host not allowed",
+        "The request's Host header names a host the app doesn't answer for. Under `jongo dev` the app "
+        "answers only requests addressed to localhost, 127.0.0.1, ::1 or a *.localhost name, plus the "
+        "names in Jongo(allowed_hosts=[...]): a web page you visit can then not reach the dev server "
+        "through a domain it controls (DNS rebinding) and read the debug pages, the status endpoint or "
+        "call your server functions. In production the check applies only when allowed_hosts is set.",
+        "Open the app as http://localhost:PORT, or list the name it is reached by: "
+        "Jongo(__name__, allowed_hosts=[\"myapp.example.com\", \"192.168.1.20\"]).",
+        "app = Jongo(__name__, allowed_hosts=[\"myapp.example.com\"])\n# Host: other.example -> 400 J214",
+    ),
     # -- J3xx database ------------------------------------------------------------------------
     "J300": _e(
         "Database error",
@@ -538,9 +549,13 @@ CATALOGUE: dict[str, dict] = {
         "Add app = Jongo(__name__) to the module, or name it: jongo check module:attr.",
     ),
     "J505": _e(
-        "Port already in use",
-        "Another process is listening on the port.",
-        "Use another port (--port 8001) or stop the other process.",
+        "Port in use, or the address can't be listened on",
+        "The server couldn't listen on the host and port it was given: another process is already "
+        "listening on the port, the host isn't an address of this machine (or doesn't resolve), or the "
+        "port needs privileges (below 1024 on most systems). A --port outside 0-65535 is refused before "
+        "anything starts.",
+        "Use another port (--port 8001) or stop the other process; check --host (127.0.0.1 for this machine "
+        "only, 0.0.0.0 for every interface).",
     ),
     "J506": _e(
         "Static directory missing",
@@ -591,6 +606,15 @@ CATALOGUE: dict[str, dict] = {
         "The variable is unset or shorter than 16 characters, so every request is refused (J420).",
         "Set JONGO_MCP_TOKEN to a long random value (python -c \"import secrets; print(secrets.token_urlsafe(32))\"), "
         "or remove app.mcp() from the production app.",
+    ),
+    "J515": _e(
+        "Can't write the file or directory",
+        "A CLI command couldn't create or write the path it was given: `jongo new NAME` (the project "
+        "directory), `jongo context -o FILE`, `jongo openapi -o FILE` or `jongo build` (.jongo/build/). "
+        "The parent directory doesn't exist or isn't writable, or the name is too long for the file system.",
+        "Pass a path inside a directory that exists and that you can write to (create it first with mkdir -p), "
+        "with a shorter name if the system says it is too long.",
+        "jongo context -o docs/AGENTS.md     # J515 until docs/ exists: mkdir -p docs",
     ),
 }
 
