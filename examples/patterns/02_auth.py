@@ -9,11 +9,20 @@ What to notice
 * `request.user` is available in pages, routes and `@server` functions.
 * The sign-in form is a classic HTML POST, so it works with JavaScript switched off.
   A classic form needs the CSRF token as a hidden input; browser code sends it itself.
+* `?next=` comes from the URL, so anyone can write a link with their own value in it.
+  `is_local_url()` keeps the redirect after sign-in on this site: `https://evil.example`,
+  `//evil.example` and `/\\evil.example` all fall back to `/`.
+* `authenticate(username, password, request)` gets the request, so wrong passwords are
+  also counted per address; over the limit it raises a 429, shown here as a message.
 """
+
+from urllib.parse import quote
 
 from jongo import Jongo, component, redirect, state
 from jongo.auth import User, authenticate, login, logout
-from jongo.html import a, button, div, form, h1, input_, label, p, span
+from jongo.html import a, button, div, form, h1, input_, label, p
+from jongo.http import is_local_url
+from jongo.ratelimit import TooManyRequests
 
 app = Jongo(__name__, title="Accounts", login_url="/login")
 
@@ -35,20 +44,33 @@ def account(request):
     return div(h1("Your account"), p(f"Signed in as {request.user.username}."))
 
 
+def safe_next(value) -> str:
+    """Where to go after signing in: a path on this site, never somewhere else."""
+    return value if value and is_local_url(value) else "/"
+
+
+ERRORS = {"1": "Wrong username or password.", "throttled": "Too many attempts. Try again in a few minutes."}
+
+
 @app.page("/login")
 def login_page(request):
-    return div(h1("Sign in"), SignInForm(next=request.query.get("next", "/"),
-                                         csrf=request.csrf_token))
+    error = ERRORS.get(request.query.get("error", ""))
+    return div(h1("Sign in"), p(error, role="alert") if error else None,
+               SignInForm(next=safe_next(request.query.get("next")), csrf=request.csrf_token))
 
 
 @app.route("/login", methods=("POST",))
 def do_login(request):
     """A plain form POST: no JavaScript involved."""
-    user = authenticate(request.form.get("username", ""), request.form.get("password", ""))
+    destination = safe_next(request.form.get("next"))
+    try:
+        user = authenticate(request.form.get("username", ""), request.form.get("password", ""), request)
+    except TooManyRequests:
+        return redirect("/login?error=throttled&next=" + quote(destination))
     if user is None:
-        return redirect("/login?error=1")
+        return redirect("/login?error=1&next=" + quote(destination))
     login(request, user)
-    return redirect(request.form.get("next") or "/")
+    return redirect(destination)
 
 
 @app.route("/logout", methods=("POST",))

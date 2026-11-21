@@ -14,6 +14,8 @@ What to notice
   for one username in 5 minutes it stops checking and raises a 429 (code J213), which
   this page shows as a message. Nothing to configure.
 * `rate_limit="5/minute"` on sign-up stops one visitor creating accounts in a loop.
+* The "taken" check uses `username__iexact`, so nobody can register `Ann` next to `ann`
+  and have two accounts that look the same.
 * Passing `user=request.user` when revoking matters: the id comes from the browser, and
   without it anyone could end anyone's session by counting upwards.
 """
@@ -30,7 +32,7 @@ def sign_up(request, username: str, password: str) -> dict:
     username = username.strip()
     if len(username) < 2 or len(password) < 6:
         raise db.ValidationError({"username": "Pick a username (2+) and a password (6+ characters)."})
-    if auth.User.filter(username=username).exists():
+    if auth.User.filter(username__iexact=username).exists():     # "Ann" is taken if "ann" is
         raise db.ValidationError({"username": "That username is taken."})
     auth.login(request, auth.User.create_user(username, password))
     return {"ok": True}

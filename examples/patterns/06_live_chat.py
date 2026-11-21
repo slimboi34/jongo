@@ -70,5 +70,7 @@ def Chat(history, who):
 
 @app.page("/")
 def home():
-    history = [m.to_dict() for m in Message.all().order_by("id")[:50]]
+    # The newest 50, shown oldest first: take the last 50 by id, then put them back in order.
+    latest = Message.all().order_by("-id")[:50]
+    history = [m.to_dict() for m in reversed(list(latest))]
     return div(h1("Lobby"), Chat(history=history, who=""))
