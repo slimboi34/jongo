@@ -26,6 +26,12 @@ Delivery is at-most-once and in-order per subscriber: messages are pushed over o
 connection per browser tab, and a subscriber that falls too far behind drops its oldest
 messages rather than growing without bound. It is a live feed, not a queue — a client
 that reconnects sees what happens next, not what it missed.
+
+A stream opened by a signed-in user ends when that sign-in stops being valid (revoked,
+expired, or the password changed): the stream re-checks it at least every
+``SESSION_CHECK_SECONDS`` while it delivers messages, and on every keepalive. To end one
+browser's streams at once, call ``hub.drop_session(login_session)`` (or
+``hub.drop_user(user)``) after revoking.
 """
 
 from __future__ import annotations
@@ -34,11 +40,12 @@ import json
 import queue
 import re
 import threading
+import time
 import typing
 from dataclasses import dataclass, field
 
 from . import log as _jlog
-from .errors import Forbidden, JongoError
+from .errors import Forbidden, HTTPError, JongoError
 from .vdom import to_json_data
 from .routing import CONVERTERS, _ANNOTATION_CONVERTERS, _PARAM
 
@@ -49,6 +56,14 @@ MAX_CHANNELS = 20
 MAX_CHANNEL_LENGTH = 200
 #: Seconds between keepalive comments, so proxies don't close an idle stream.
 PING_SECONDS = 15
+#: How many live connections one process holds at most; past it, new ones get a 503.
+MAX_SUBSCRIBERS = 10_000
+#: How long a refused (full) connection's browser waits before trying again, in milliseconds.
+FULL_RETRY_MS = 5_000
+#: The longest a signed-in user's stream goes without re-checking that the sign-in still holds.
+SESSION_CHECK_SECONDS = 5.0
+
+_END = object()  # put on a subscriber's queue to end its stream
 
 _CHANNEL_NAME = re.compile(r"^[^\s\x00-\x1f]{1,%d}$" % MAX_CHANNEL_LENGTH)
 
@@ -103,6 +118,15 @@ class Subscriber:
     channels: frozenset[str]
     queue: "queue.Queue[str]" = field(default_factory=lambda: queue.Queue(maxsize=BACKLOG))
     dropped: int = 0
+    #: The sign-in (LoginSession id) and user id the connection was opened with, if any.
+    login_session: typing.Any = None
+    user: typing.Any = None
+    #: Set when the hub ended the stream (drop_session/drop_user); it closes on its next step.
+    ended: bool = False
+
+    def end(self) -> None:
+        self.ended = True
+        self.offer(_END)  # wake the stream if it is waiting for a message
 
     def offer(self, payload: str) -> None:
         """Queue a message, shedding the oldest if this subscriber is not keeping up."""
@@ -118,22 +142,68 @@ class Subscriber:
                     pass
 
 
+class HubFull(HTTPError):
+    """The process holds ``MAX_SUBSCRIBERS`` live connections already (a 503)."""
+
+    def __init__(self):
+        super().__init__(503, f"This server holds the most live connections it allows ({MAX_SUBSCRIBERS}).",
+                         code="J410",
+                         hint="try again shortly; jongo.live.MAX_SUBSCRIBERS caps open live() streams per process")
+        self.retry_after = max(1, FULL_RETRY_MS // 1000)
+
+
 class Hub:
     """Fan-out from ``broadcast()`` to the connections subscribed to each channel."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._channels: dict[str, set[Subscriber]] = {}
+        self._subscribers: set[Subscriber] = set()
 
-    def subscribe(self, channels: typing.Iterable[str]) -> Subscriber:
-        subscriber = Subscriber(frozenset(channels))
+    def check_capacity(self) -> None:
+        """Raise :class:`HubFull` (a 503) if no more connections may subscribe."""
         with self._lock:
+            full = len(self._subscribers) >= MAX_SUBSCRIBERS
+        if full:
+            raise HubFull()
+
+    def subscribe(self, channels: typing.Iterable[str], *, login_session=None, user=None) -> Subscriber:
+        """Register a connection on ``channels``; raises :class:`HubFull` past ``MAX_SUBSCRIBERS``."""
+        subscriber = Subscriber(frozenset(channels), login_session=login_session, user=user)
+        with self._lock:
+            if len(self._subscribers) >= MAX_SUBSCRIBERS:
+                raise HubFull()
+            self._subscribers.add(subscriber)
             for channel in subscriber.channels:
                 self._channels.setdefault(channel, set()).add(subscriber)
         return subscriber
 
+    def drop_session(self, session) -> int:
+        """End the open streams of one sign-in now; returns how many ended.
+
+        ``session`` is a ``jongo.auth.LoginSession`` or its id, as ``auth.revoke_session``
+        takes. Without this a revoked session's streams still end, within
+        ``SESSION_CHECK_SECONDS`` of their next message or keepalive.
+        """
+        pk = getattr(session, "pk", session)
+        return self._drop(lambda s: s.login_session is not None and s.login_session == pk)
+
+    def drop_user(self, user) -> int:
+        """End every open stream a user (or user id) has, e.g. after ``auth.revoke_sessions``."""
+        uid = getattr(user, "pk", user)
+        return self._drop(lambda s: s.user is not None and s.user == uid)
+
+    def _drop(self, match) -> int:
+        with self._lock:
+            doomed = [s for s in self._subscribers if match(s)]
+        for subscriber in doomed:
+            self.unsubscribe(subscriber)  # no more messages reach it...
+            subscriber.end()              # ...and its stream closes on its next step
+        return len(doomed)
+
     def unsubscribe(self, subscriber: Subscriber) -> None:
         with self._lock:
+            self._subscribers.discard(subscriber)
             for channel in subscriber.channels:
                 listeners = self._channels.get(channel)
                 if listeners is None:
@@ -157,12 +227,13 @@ class Hub:
         with self._lock:
             if channel is not None:
                 return len(self._channels.get(channel, ()))
-            return len({s for listeners in self._channels.values() for s in listeners})
+            return len(self._subscribers)
 
     def clear(self) -> None:
         """Drop every subscription (used between tests)."""
         with self._lock:
             self._channels.clear()
+            self._subscribers.clear()
 
 
 #: The process-wide hub. One process fans out to its own connections; see the docs on
@@ -221,16 +292,43 @@ def authorize(channels: typing.Iterable[str], declared: list[Channel], request) 
 
 
 def event_stream(subscriber: Subscriber, *, ping_seconds: float = PING_SECONDS,
-                 stop: threading.Event | None = None) -> typing.Iterator[str]:
-    """Yield SSE frames for one connection until the client goes away."""
+                 stop: threading.Event | None = None,
+                 alive: typing.Callable[[], bool] | None = None) -> typing.Iterator[str]:
+    """Yield SSE frames for one connection until the client goes away.
+
+    ``alive``, when given, says whether the connection may keep receiving (for a signed-in
+    user: whether the sign-in still holds). It is asked before a message is delivered and
+    on a keepalive, at most once per ``SESSION_CHECK_SECONDS``; once it says no (or
+    raises), the stream ends without delivering anything more. The stream also ends when
+    the hub drops the subscriber.
+    """
     yield ": subscribed\n\n"
-    while stop is None or not stop.is_set():
+    checked = time.monotonic()  # the request that opened the stream was just checked
+    while (stop is None or not stop.is_set()) and not subscriber.ended:
         try:
             payload = subscriber.queue.get(timeout=ping_seconds)
         except queue.Empty:
+            payload = None
+        if payload is _END or subscriber.ended:
+            break
+        if alive is not None and time.monotonic() - checked >= SESSION_CHECK_SECONDS:
+            if not _still_alive(alive):
+                break
+            checked = time.monotonic()
+        if payload is None:
             yield ": ping\n\n"  # keeps proxies from closing an idle stream
             continue
         yield f"data: {payload}\n\n"
+    if stop is None or not stop.is_set():  # ended by the hub, or the sign-in no longer holds
+        yield ": signed out\n\n"
+
+
+def _still_alive(alive) -> bool:
+    try:
+        return bool(alive())
+    except Exception:  # can't tell (e.g. the database is down): fail closed; the browser reconnects
+        _jlog.get_logger("live").warning("couldn't re-check a live stream's sign-in; ending it", exc_info=True)
+        return False
 
 
 def parse_channels(raw: str | None) -> list[str]:
@@ -243,5 +341,10 @@ def parse_channels(raw: str | None) -> list[str]:
         if channel:
             seen[channel] = None
     if len(seen) > MAX_CHANNELS:
-        raise Forbidden(f"A connection may subscribe to at most {MAX_CHANNELS} channels.")
+        raise Forbidden(
+            f"A connection may subscribe to at most {MAX_CHANNELS} channels; this one asked for {len(seen)}.",
+            code="J210",
+            hint=f"every live() on a page shares the tab's one connection, capped at jongo.live.MAX_CHANNELS "
+                 f"({MAX_CHANNELS}); subscribe to fewer, broader channels, or raise MAX_CHANNELS on the server",
+        )
     return list(seen)

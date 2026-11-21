@@ -358,6 +358,14 @@ CATALOGUE: dict[str, dict] = {
         "(rate_limit=\"30/minute\", or jongo.auth.LOGIN_ATTEMPTS / LOGIN_WINDOW for sign-in).",
         "@server(rate_limit=\"5/minute\")\ndef send_invite(request, email: str) -> dict: ...",
     ),
+    "J214": _e(
+        "Host not allowed",
+        "The request's Host header names a host the app doesn't answer to. Under `jongo dev` the app answers "
+        "localhost, *.localhost and IP addresses only, so a web page can't reach the dev server by DNS rebinding "
+        "(its own domain, pointed at 127.0.0.1); in production the check applies when Jongo(allowed_hosts=...) is set.",
+        "Open the app as localhost or 127.0.0.1, or list the host: Jongo(__name__, allowed_hosts=[\"myapp.test\"]) "
+        "(a leading dot, \".example.com\", also allows subdomains).",
+    ),
     # -- J3xx database ------------------------------------------------------------------------
     "J300": _e(
         "Database error",

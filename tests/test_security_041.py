@@ -84,6 +84,8 @@ def test_nosniff_on_every_response(admin_client):
 
 
 def test_non_admin_pages_can_still_be_framed():
+    """The admin's DENY stays on the admin. Since 0.7.0 other pages default to SAMEORIGIN
+    (the app may frame itself), and frame_options=None lets anyone frame them."""
     app = Jongo("frame_test", root=Path(__file__).parent, dev=True, secret_key="s")
     app.admin()
 
@@ -91,7 +93,18 @@ def test_non_admin_pages_can_still_be_framed():
     def home():
         return p("hi")
 
-    assert "x-frame-options" not in app.test_client().get("/").headers
+    assert app.test_client().get("/").headers["x-frame-options"] == "SAMEORIGIN"
+
+    open_app = Jongo("frame_test_open", root=Path(__file__).parent, dev=True, secret_key="s", frame_options=None)
+    open_app.admin()
+
+    @open_app.page("/")
+    def open_home():
+        return p("hi")
+
+    headers = open_app.test_client().get("/").headers
+    assert "x-frame-options" not in headers and "content-security-policy" not in headers
+    assert open_app.test_client().get("/admin/login").headers["x-frame-options"] == "DENY"
 
 
 # -- javascript: URLs in upper/mixed-case attribute names ------------------------------------
