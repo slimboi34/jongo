@@ -314,7 +314,12 @@ class Float(Field):
         return number
 
     def to_python(self, value: Any) -> Any:
-        return None if value is None else float(value)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):  # e.g. text left in the column by a type change: one bad
+            return value  # row must not make the whole table unreadable
 
     def parse(self, value: Any) -> Any:
         if value is None or _is_blank_string(value):

@@ -526,3 +526,147 @@ def test_rebuild_of_a_table_that_never_had_a_row_or_autoincrement():
     db.migrate()
     assert _sequence("empty") in ([], [0])  # SQLite writes 0 for an empty INSERT ... SELECT
     assert Empty.create(title="first").pk == 1
+
+
+# ------------------------------- a type change that would leave values unconverted (SQLite) ---
+
+
+def _column_type(table: str, column: str) -> str:
+    rows = connection.get_connection().execute(f'PRAGMA table_info("{table}")').fetchall()
+    return next(row["type"] for row in rows if row["name"] == column)
+
+
+@sqlite_only
+def test_text_to_int_with_unconvertible_rows_is_refused_with_j303():
+    class Score(db.Model):
+        points = db.Text(blank=True)
+
+    db.migrate()
+    for value in ["12", "abc", "", "1.5", " 7 ", "1e3", "-3"]:  # "abc", "" and "1.5" can't be INTEGER
+        Score.create(points=value)
+
+    class Score(db.Model):  # noqa: F811
+        points = db.Int()
+
+    plan = db.plan_migrations()
+    assert [op.kind for op in plan] == ["rebuild_table"]
+    assert plan[0].destructive
+    assert plan[0].describe() == ('Rebuild table "score" to change the type of "score"."points" from TEXT to '
+                                  'INTEGER (3 rows hold a value that is not a whole number)')
+    with pytest.raises(db.MigrationError) as caught:
+        db.migrate()
+    error = caught.value
+    assert error.code == "J303"
+    assert str(error) == ('Cannot change "score"."points" from TEXT to INTEGER: 3 rows hold a value that is '
+                          'not a whole number (ids 2, 3, 4).')
+    assert "--allow-destructive" in error.hint
+    assert _column_type("score", "points") == "TEXT"  # nothing was applied
+    assert [(op.kind, applied) for op, applied in db.migrate(dry_run=True)] == [("rebuild_table", False)]
+
+    results = db.migrate(allow_destructive=True)
+    assert [applied for _, applied in results] == [True]
+    assert _column_type("score", "points") == "INTEGER"
+    assert [s.points for s in Score.all().order_by("id")] == [12, "abc", "", 1.5, 7, 1000, -3]
+    assert db.plan_migrations() == []
+
+
+@sqlite_only
+def test_text_to_float_refused_then_the_table_stays_readable():
+    class Reading(db.Model):
+        value = db.Text(null=True)
+
+    db.migrate()
+    for value in ["1.5", "abc", None, "2"]:
+        Reading.create(value=value)
+
+    class Reading(db.Model):  # noqa: F811
+        value = db.Float(null=True)
+
+    with pytest.raises(db.MigrationError, match=r'"reading"."value" from TEXT to REAL: 1 row holds a value '
+                                                r"that is not a number \(id 2\)"):
+        db.migrate()
+    db.migrate(allow_destructive=True)
+    # One unconvertible row used to make every read of the table raise ValueError.
+    assert [r.value for r in Reading.all().order_by("id")] == [1.5, "abc", None, 2.0]
+
+
+@sqlite_only
+def test_text_to_bool_and_float_to_int_are_checked_too():
+    class Flag(db.Model):
+        on = db.Text()
+        ratio = db.Float()
+
+    db.migrate()
+    Flag.create(on="1", ratio=2.0)
+    Flag.create(on="true", ratio=2.5)
+    Flag.create(on="0", ratio=-0.0)
+
+    class Flag(db.Model):  # noqa: F811
+        on = db.Bool()
+        ratio = db.Int()
+
+    with pytest.raises(db.MigrationError) as caught:
+        db.migrate()
+    message = str(caught.value)
+    assert '"flag"."on" from TEXT to INTEGER: 1 row holds a value that is not a whole number (id 2).' in message
+    assert '"flag"."ratio" from REAL to INTEGER: 1 row holds a value that is not a whole number (id 2).' in message
+
+
+@sqlite_only
+def test_a_type_change_whose_values_all_convert_still_needs_no_flag():
+    class Score(db.Model):
+        points = db.Text(null=True)
+        weight = db.Int()
+
+    db.migrate()
+    Score.create(points="12", weight=3)
+    Score.create(points=None, weight=4)
+    Score.create(points=" 8 ", weight=2**53)
+
+    class Score(db.Model):  # noqa: F811
+        points = db.Int(null=True)
+        weight = db.Float()
+
+    plan = db.plan_migrations()
+    assert not plan[0].destructive and plan[0].lossy == []
+    db.migrate()
+    assert [(s.points, s.weight) for s in Score.all().order_by("id")] == [(12, 3.0), (None, 4.0), (8, 2.0**53)]
+
+
+def test_float_to_python_keeps_a_value_it_cannot_convert():
+    field = db.Float()
+    assert field.to_python("abc") == "abc" and field.to_python(b"\x00") == b"\x00"
+    assert field.to_python("2.5") == 2.5 and field.to_python(None) is None
+
+
+@sqlite_only
+def test_jongo_migrate_reports_the_refusal_with_its_code_and_hint(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    app = ("from jongo import Jongo, db\n"
+           "app = Jongo(__name__, database='db.sqlite3')\n"
+           "class Item(db.Model):\n"
+           "    qty = db.{}()\n")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("JONGO_DEV", "JONGO_ENV", "JONGO_APP", "JONGO_STATUS_TOKEN", "JONGO_DATABASE")}
+    env["NO_COLOR"] = "1"
+
+    def cli(*args):
+        return subprocess.run([sys.executable, "-m", "jongo", *args], cwd=tmp_path, capture_output=True,
+                              text=True, env=env, timeout=60)
+
+    (tmp_path / "app.py").write_text(app.format("Text"))
+    assert cli("migrate").returncode == 0
+    with __import__("sqlite3").connect(tmp_path / "db.sqlite3") as conn:
+        conn.execute("INSERT INTO item (qty) VALUES ('3'), ('lots')")
+    (tmp_path / "app.py").write_text(app.format("Int"))
+    plan = cli("migrate", "--plan")
+    assert plan.returncode == 0 and "(1 row holds a value that is not a whole number) (destructive)" in plan.stdout
+    refused = cli("migrate")
+    assert refused.returncode == 1 and "Traceback" not in refused.stderr
+    assert '[J303] couldn\'t migrate the database: Cannot change "item"."qty" from TEXT to INTEGER' in refused.stderr
+    assert "--allow-destructive" in refused.stderr
+    applied = cli("migrate", "--allow-destructive")
+    assert applied.returncode == 0 and "✓ Rebuild table" in applied.stdout
