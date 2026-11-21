@@ -26,7 +26,7 @@ class _Nothing:
 
 NOTHING: Any = _Nothing()
 
-ON_DELETE_ACTIONS = ("CASCADE", "SET NULL", "RESTRICT")
+ON_DELETE_ACTIONS = ("CASCADE", "SET NULL", "RESTRICT", "NO ACTION")
 TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 
@@ -79,7 +79,12 @@ class Field:
         label: str | None = None,
         help: str | None = None,
         editable: bool = True,
+        help_text: str | None = None,
     ):
+        if help_text is not None:  # Django's spelling, accepted as an alias
+            if help is not None:
+                raise TypeError("Pass help= or help_text= (an alias for help=), not both.")
+            help = help_text
         self.default = default
         self.null = null
         self.unique = unique
@@ -113,6 +118,15 @@ class Field:
     @label.setter
     def label(self, value: str | None) -> None:
         self._label = value
+
+    @property
+    def help_text(self) -> str | None:
+        """Alias for ``help``."""
+        return self.help
+
+    @help_text.setter
+    def help_text(self, value: str | None) -> None:
+        self.help = value
 
     @property
     def required(self) -> bool:
