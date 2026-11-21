@@ -36,6 +36,7 @@ import hashlib
 import hmac
 import re
 import secrets
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -384,12 +385,32 @@ def _rotate_csrf(request) -> None:
         rotate()
 
 
+def _end_streams(ids) -> None:
+    """End the open ``live()`` streams of these sign-ins now (if ``jongo.live`` is in use).
+
+    Without this a revoked sign-in's stream still ends, but only on its next re-check
+    (``live.SESSION_CHECK_SECONDS``); this makes signing out take effect at once.
+    """
+    live = sys.modules.get("jongo.live")
+    hub = getattr(live, "hub", None)
+    if hub is None:
+        return
+    for pk in ids:
+        try:
+            hub.drop_session(pk)
+        except Exception:  # ending a stream must never make signing out fail
+            pass
+
+
 def _end_current(request) -> None:
     sid = request.session.get("_sid")
     if sid:
         try:
             _ensure_table()
-            LoginSession.filter(key=_key_for(str(sid))).delete()
+            found = LoginSession.filter(key=_key_for(str(sid)))
+            ids = found.values_list("id", flat=True)
+            found.delete()
+            _end_streams(ids)
         except Exception:  # signing out must not fail because the record couldn't be removed
             pass
 
@@ -459,7 +480,8 @@ def sessions(user: User) -> list[LoginSession]:
 
 
 def revoke_session(session, user: User | None = None) -> bool:
-    """End one sign-in. The browser holding it is signed out on its next request.
+    """End one sign-in. The browser holding it is signed out on its next request, and any
+    ``live()`` stream it has open ends at once.
 
     Parameters:
         session: a :class:`LoginSession` or its ``id``.
@@ -481,11 +503,15 @@ def revoke_session(session, user: User | None = None) -> bool:
     found = LoginSession.filter(id=pk)
     if user is not None:
         found = found.filter(user_id=user.id)
-    return found.delete() > 0
+    ids = found.values_list("id", flat=True)
+    ended = found.delete()
+    _end_streams(ids)
+    return ended > 0
 
 
 def revoke_sessions(user: User, *, keep=None) -> int:
-    """End every sign-in a user has: "sign out everywhere".
+    """End every sign-in a user has: "sign out everywhere". Their open ``live()`` streams
+    end at once (except those of the sign-in ``keep`` spares).
 
     Parameters:
         user: whose sessions to end.
@@ -508,4 +534,7 @@ def revoke_sessions(user: User, *, keep=None) -> int:
         spare = LoginSession.filter(key=_key_for(str(sid))).first() if sid else None
     if spare is not None:
         found = found.exclude(id=spare.pk)
-    return found.delete()
+    ids = found.values_list("id", flat=True)
+    ended = found.delete()
+    _end_streams(ids)
+    return ended

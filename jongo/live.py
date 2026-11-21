@@ -29,9 +29,10 @@ that reconnects sees what happens next, not what it missed.
 
 A stream opened by a signed-in user ends when that sign-in stops being valid (revoked,
 expired, or the password changed): the stream re-checks it at least every
-``SESSION_CHECK_SECONDS`` while it delivers messages, and on every keepalive. To end one
-browser's streams at once, call ``hub.drop_session(login_session)`` (or
-``hub.drop_user(user)``) after revoking.
+``SESSION_CHECK_SECONDS`` while it delivers messages, and on every keepalive.
+``auth.logout``, ``auth.revoke_session`` and ``auth.revoke_sessions`` end the affected
+streams at once; ``hub.drop_session(login_session)`` and ``hub.drop_user(user)`` do the same
+for code that removes sign-ins some other way.
 """
 
 from __future__ import annotations
@@ -181,15 +182,16 @@ class Hub:
     def drop_session(self, session) -> int:
         """End the open streams of one sign-in now; returns how many ended.
 
-        ``session`` is a ``jongo.auth.LoginSession`` or its id, as ``auth.revoke_session``
-        takes. Without this a revoked session's streams still end, within
-        ``SESSION_CHECK_SECONDS`` of their next message or keepalive.
+        ``session`` is a ``jongo.auth.LoginSession`` or its id. ``auth.logout``,
+        ``auth.revoke_session`` and ``auth.revoke_sessions`` call this for you; a sign-in
+        removed any other way still ends its streams, within ``SESSION_CHECK_SECONDS`` of
+        their next message or keepalive.
         """
         pk = getattr(session, "pk", session)
         return self._drop(lambda s: s.login_session is not None and s.login_session == pk)
 
     def drop_user(self, user) -> int:
-        """End every open stream a user (or user id) has, e.g. after ``auth.revoke_sessions``."""
+        """End every open stream a user (or user id) has, e.g. when deleting or locking the user."""
         uid = getattr(user, "pk", user)
         return self._drop(lambda s: s.user is not None and s.user == uid)
 

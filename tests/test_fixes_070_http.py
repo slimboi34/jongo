@@ -363,7 +363,6 @@ def test_the_hub_can_end_a_sessions_streams_at_once(monkeypatch):
     app = live_app()
     ann, chunks = signed_in_stream(app)
     (session,) = auth.sessions(ann)
-    auth.revoke_session(session)
     assert hub.drop_session(session) == 1
     assert broadcast("members", "secret") == 0
     assert b"".join(chunks) == b": signed out\n\n"
@@ -373,6 +372,32 @@ def test_the_hub_can_end_a_sessions_streams_at_once(monkeypatch):
     _, bob_chunks = client.stream("/_jongo/live?channels=members")
     assert hub.drop_user(bob) == 1 and hub.subscriber_count() == 0
     bob_chunks.close()
+
+
+def test_revoking_or_signing_out_ends_the_stream_at_once(monkeypatch):
+    # The re-check is an hour away, so only auth calling hub.drop_session can end these.
+    monkeypatch.setattr(live, "SESSION_CHECK_SECONDS", 3600)
+    app = live_app()
+    ann, chunks = signed_in_stream(app)
+    (session,) = auth.sessions(ann)
+    assert auth.revoke_session(session) is True
+    assert broadcast("members", "secret") == 0
+    assert b"".join(chunks) == b": signed out\n\n"
+
+    here, there = TestClient(app), TestClient(app)
+    here.login(ann)
+    there.login(ann)
+    _, here_chunks = here.stream("/_jongo/live?channels=members")
+    _, there_chunks = there.stream("/_jongo/live?channels=members")
+    assert next(here_chunks) == next(there_chunks) == b": subscribed\n\n"
+    keep = auth.LoginSession.filter(user_id=ann.id).order_by("id").first()
+    assert auth.revoke_sessions(ann, keep=keep) == 1
+    assert hub.subscriber_count() == 1, "the spared sign-in keeps its stream"
+    assert broadcast("members", "still here") == 1
+    here_chunks.close()
+    there_chunks.close()
+
+    assert auth.revoke_session(999999) is False and hub.subscriber_count() == 0
 
 
 def test_an_anonymous_stream_has_nothing_to_revoke():
