@@ -13,7 +13,7 @@ import pytest
 from jongo import db
 from jongo.db import connection
 
-from conftest import on_postgres, sqlite_only, use_test_database
+from conftest import sqlite_only, use_test_database
 
 
 @pytest.fixture(autouse=True)
