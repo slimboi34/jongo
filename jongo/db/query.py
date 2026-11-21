@@ -46,7 +46,21 @@ def integrity_to_validation(exc: Exception, model) -> "ValidationError | None":
         return ValidationError({name: f"{vn} with this {label} already exists."})
     if kind == "notnull":
         field = field_for(ref)
-        return ValidationError({(field.name if field else "__all__"): "This field is required."})
+        if field is not None:
+            return ValidationError({field.name: "This field is required."})
+        column = (ref or "").split(".")[-1].strip().strip('"')
+        if not column or column.lower() == "id":
+            return ValidationError({"__all__": "This field is required."})
+        # A column the model no longer declares (a field removed or renamed, and the old
+        # column kept because dropping it is destructive): every insert leaves it NULL.
+        error = ValidationError({"__all__": (
+            f'Column "{column}" is NOT NULL in the database but is not a field on {model.__name__} '
+            f"(left over from an earlier schema); run `jongo migrate --allow-destructive` to drop it, "
+            f"or make it nullable."
+        )})
+        error.hint = (f'Drop the leftover column with `jongo migrate --allow-destructive` (or add the field back '
+                      f'with null=True or a default) so inserts into "{meta.table}" stop failing.')
+        return error
     if kind == "foreign_key":  # sqlite doesn't name the column
         field = field_for(ref)
         fks = [f for f in meta.fields if isinstance(f, ForeignKey)]

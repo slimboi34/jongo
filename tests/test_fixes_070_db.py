@@ -184,3 +184,45 @@ def test_exact_still_finds_a_stored_nul_on_sqlite():
     assert [d.title for d in Doc.filter(title="a\x00b")] == ["a\x00b"]
     assert Doc.filter(title__startswith="a\x00zzz").count() == 0  # used to match "a\x00b"
     assert Doc.filter(title__iexact="a\x00").count() == 0  # used to match "a\x00b"
+
+
+# ------------------------------------ a NOT NULL column left over from an earlier schema ---
+
+
+def test_insert_failing_on_a_leftover_not_null_column_names_it():
+    class User(db.Model):
+        fullname = db.Text()
+        age = db.Int()
+
+    db.migrate()
+    User.create(fullname="a", age=3)
+
+    class User(db.Model):  # noqa: F811 -- fullname renamed to name
+        name = db.Text(default="")
+        age = db.Int()
+
+    results = db.migrate()  # adds "name"; keeps "fullname" because dropping it is destructive
+    assert [(op.kind, applied) for op, applied in results] == [("add_column", True), ("drop_column", False)]
+    with pytest.raises(db.ValidationError) as caught:
+        User.create(name="b", age=4)
+    error = caught.value
+    assert error.code == "J304" and list(error.errors) == ["__all__"]
+    message = error.errors["__all__"]
+    assert 'Column "fullname" is NOT NULL in the database but is not a field on User' in message
+    assert "jongo migrate --allow-destructive" in message
+    assert "allow-destructive" in error.hint
+
+    db.migrate(allow_destructive=True)
+    assert User.create(name="b", age=4).pk == 2
+
+
+def test_a_missing_value_for_a_real_field_still_says_required():
+    from jongo.db.query import integrity_to_validation
+
+    class Note(db.Model):
+        body = db.Text()
+
+    db.migrate()
+    with pytest.raises(connection.dialect().integrity_errors()) as caught:
+        db.execute(f'INSERT INTO "{Note._meta.table}" ("body") VALUES (NULL)')
+    assert integrity_to_validation(caught.value, Note).errors == {"body": "This field is required."}
