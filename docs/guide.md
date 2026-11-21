@@ -545,12 +545,14 @@ def Chat(room):
 - `live()` follows the component: it subscribes on mount, moves when the channel changes,
   and unsubscribes on unmount. One SSE connection per tab carries every channel the page
   asked for, and reconnects with backoff.
-- That connection may carry at most `live.MAX_CHANNELS` (20) channels, and a channel name
-  is at most `live.MAX_CHANNEL_LENGTH` (200) characters. Because the tab has one stream, the
-  limit counts every `live()` on the page together: thirty rows that each call
-  `live(f"row:{id}")` ask for thirty channels, and the stream is refused (403, `J210`, with
-  a message naming the limit). Under `jongo dev` the browser reports it in the console and
-  stops retrying. Use one channel for the list and put the row id in the message.
+- That connection may carry at most `MAX_CHANNELS` (20) channels, and a channel name is at
+  most `MAX_CHANNEL_LENGTH` (200) characters. Both live in the `jongo.live` module (import
+  them with `from jongo.live import MAX_CHANNELS`; `from jongo import live` is the hook).
+  Because the tab has one stream, the limit counts every `live()` on the page together:
+  thirty rows that each call `live(f"row:{id}")` ask for thirty channels, and the stream is
+  refused (403, `J210`, with a message naming the limit). Under `jongo dev` the browser
+  reports it in the console and stops retrying. Use one channel for the list and put the row
+  id in the message.
 - `broadcast()` returns how many connections it reached. Anything that can call a function
   can push: a request handler, a thread, a cron job, a queue worker.
 - It is a **live feed, not a queue.** A browser that reconnects sees what happens next, not

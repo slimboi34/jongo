@@ -273,10 +273,11 @@ tab carries every channel the page asked for, and reconnects with backoff if it 
   broadcast reaches every connection. Across multiple worker processes, each worker only
   reaches its own connections — put a shared bus in front if you need that.
 - Each streaming connection holds a worker thread, so raise `--threads` for a chatty app.
-- A tab may listen to at most `live.MAX_CHANNELS` (20) channels, with names of at most
-  `live.MAX_CHANNEL_LENGTH` (200) characters. The one stream counts every `live()` on the
-  page together, so give a list one channel and put the row id in the message, rather than
-  a channel per row; past the limit the stream is refused (403, `J210`).
+- A tab may listen to at most `MAX_CHANNELS` (20) channels, with names of at most
+  `MAX_CHANNEL_LENGTH` (200) characters (both in the `jongo.live` module). The one stream
+  counts every `live()` on the page together, so give a list one channel and put the row id
+  in the message, rather than a channel per row; past the limit the stream is refused (403,
+  `J210`).
 
 ## Styles
 
