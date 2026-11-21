@@ -252,8 +252,9 @@ class Jongo:
              admin_required=False, rate_limit=None):
         """Register a page. The function returns UI (a component or elements), a Page, or a Response.
 
-        ``rate_limit="30/minute"`` caps how often one caller (the signed-in user, else the
-        client address) may load it; over the limit they get a 429 (``J213``).
+        ``rate_limit="30/minute"`` caps how often one caller may load it. Each request counts
+        against the client address and, when someone is signed in, against that user too;
+        over either limit they get a 429 (``J213``). See :mod:`jongo.ratelimit`.
         """
 
         def decorator(fn):
@@ -272,9 +273,10 @@ class Jongo:
               admin_required=False, rate_limit=None):
         """Register a plain handler. Return a Response, str (HTML), dict/list (JSON) or UI.
 
-        ``rate_limit="5/minute"`` caps how often one caller (the signed-in user, else the
-        client address) may call it; over the limit they get a 429 with ``Retry-After``
-        (``J213``) and the handler doesn't run. See :mod:`jongo.ratelimit`.
+        ``rate_limit="5/minute"`` caps how often one caller may call it. Each request counts
+        against the client address and, when someone is signed in, against that user too;
+        over either limit they get a 429 with ``Retry-After`` (``J213``) and the handler
+        doesn't run. See :mod:`jongo.ratelimit`.
         """
 
         def decorator(fn):

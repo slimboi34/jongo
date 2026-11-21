@@ -442,6 +442,17 @@ author.books.create(title="The Dispossessed")         # reverse accessor
 **Lookups:** `exact iexact contains icontains startswith istartswith endswith iendswith
 gt gte lt lte in isnull ne`.
 
+- A `DateTime` or `Date` lookup given an ISO string compares the instant it names, exactly as
+  the matching `datetime`/`date` would: `filter(at__gte="2024-03-10T12:00:00Z")` and
+  `filter(at__gte="2024-03-10T07:00:00-05:00")` find the same rows. A naive string stays
+  naive, like a naive `datetime`; a string that isn't a date is compared as text.
+- `Int`, `ForeignKey` and `id` values must fit in 64 bits (±9223372036854775807). Saving a
+  larger one is a `ValidationError` (`J304`); a lookup with one matches what Python would
+  (`get(id=2**63)` is `DoesNotExist`, `ne` matches every row).
+- A text lookup term containing a NUL character (`"\x00"`) matches nothing (PostgreSQL can't
+  store one); `exact` still compares it normally.
+- `db.JSON` refuses `NaN` and infinities (`J304`), so what it stores is always valid JSON.
+
 **Transactions:**
 
 ```python
@@ -464,7 +475,7 @@ applies the difference.
 ```bash
 jongo migrate --plan                 # show the SQL first
 jongo migrate                        # apply the safe changes
-jongo migrate --allow-destructive    # also drop columns
+jongo migrate --allow-destructive    # also drop columns and apply lossy type changes
 ```
 
 - It creates tables, adds columns, and adds or drops the indexes your fields describe.
@@ -472,6 +483,12 @@ jongo migrate --allow-destructive    # also drop columns
   rebuilding the table on SQLite (which cannot alter much) while preserving the data,
   extra columns and children.
 - It never drops a column unless you ask.
+- On SQLite, a type change where some rows hold a value the new type can't take (`"abc"` in a
+  column becoming `Int`) is refused with `J303`, naming the column, how many rows and the
+  first ids. Fix those rows, or pass `--allow-destructive` to apply it and keep those values
+  as they are. PostgreSQL refuses such a change either way.
+- A SQLite rebuild keeps the table's `AUTOINCREMENT` counter, so the ids of deleted rows are
+  never issued again.
 - Making a column `NOT NULL` fills existing NULLs from the field's default.
 - `jongo dev` applies the safe changes automatically on reload.
 - Adding a required foreign key to a table that already has rows is refused with an
@@ -801,6 +818,14 @@ system, and modules that only exist on the server.
 - A dict whose keys look like non-negative integers (`{2: "b", 1: "a"}`, or `{"10": …,
   "9": …}`) iterates those keys in ascending numeric order, ahead of the other keys, instead
   of insertion order. When order matters, keep a list (of pairs, or of keys) beside the dict.
+- Floats print as Python prints them (`1e-05`, `1e+16`), and because there is one number
+  type, so do whole numbers from 10¹⁶ up: `str(10**16)` is `"1e+16"` in the browser. Use an
+  f-string format (`f"{n:d}"`) for big counts. `str(-0.0)` prints `"0"`.
+- `json.loads` refuses the `NaN` and `Infinity` tokens Python's accepts. `casefold()` covers
+  every fold except Cherokee and Greek-extended letters. The Unicode tables behind `title()`,
+  `isdigit()` and friends are Unicode 15 (Python 3.12).
+- `navigate()`, and a `redirect()` returned by a `@server` function, only follow paths and
+  `http(s)` URLs; a `javascript:`, `data:` or other target is refused and reported.
 - A generator expression builds its whole list before the consumer sees it, so
   `any(check(x) for x in xs)` and `all(...)` call `check` for every item instead of stopping
   at the first answer. The result is the same; write a loop with `break` when the calls are
@@ -1178,8 +1203,9 @@ messages instead of the browser's native bubbles.
   so `5.0` never prints differently on the two sides.
 - Patterns are rewritten to syntax Python's `re` and JavaScript's `RegExp` read identically:
   `\d` becomes `[0-9]`, `\w` becomes `[A-Za-z0-9_]`, `.` stops at the same line endings. A
-  pattern that can't be made portable (named groups, `(?i)`, `\A`, possessive quantifiers) is
-  an error when the schema is defined (`J115`), not a surprise in production.
+  pattern that can't be made portable (named groups, `(?i)`, `\A`, possessive quantifiers,
+  `{,3}`, an unescaped `{` that isn't a repeat count, `\a`, octal escapes) is an error when
+  the schema is defined (`J115`), not a surprise in production.
 - Whole numbers beyond ±9007199254740991 are refused on both sides, rather than silently
   rounded by JavaScript.
 - `tests/test_forms.py` runs every rule against a table of awkward values (non-ASCII

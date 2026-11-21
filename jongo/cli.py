@@ -678,7 +678,7 @@ def main(argv=None):
 
     p = add("migrate", cmd_migrate, "sync the database schema with your models")
     p.add_argument("--plan", action="store_true", help="show changes without applying them")
-    p.add_argument("--allow-destructive", action="store_true", help="also drop columns")
+    p.add_argument("--allow-destructive", action="store_true", help="also drop columns and apply type changes some rows can't be converted to")
 
     p = add("routes", cmd_routes, "list routes")
     p.add_argument("--json", action="store_true", help="pages and routes as JSON, with parameters and guards")

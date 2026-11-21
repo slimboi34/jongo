@@ -265,7 +265,8 @@ CATALOGUE: dict[str, dict] = {
         "Form schema can't be built",
         "A forms.Schema (or one of its rules) is contradictory or not portable: a pattern that uses syntax "
         "only Python or only JavaScript understands (named groups, inline flags like (?i), \\A/\\Z, possessive "
-        "quantifiers, \\D inside [...]), bounds the wrong way round, a default that fails the field's own "
+        "quantifiers, \\D inside [...], {,n}, an unescaped { or } that is not a repeat count, \\a, \\U, "
+        "octal escapes such as \\01), bounds the wrong way round, a default that fails the field's own "
         "rules, or a same_as that names a missing field. It is raised when the schema is defined, because "
         "the same rules must run on the server and, compiled, in the browser.",
         "Fix the rule named in the message; write patterns with plain groups and character classes ([A-Za-z] instead of (?i)).",
@@ -389,9 +390,9 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J303": _e(
         "Migration failed or blocked",
-        "A schema change couldn't be applied: a destructive change without --allow-destructive, two "
-        "models sharing a table, a required foreign key added to a table with rows, or the database "
-        "rejected the statement.",
+        "A schema change couldn't be applied: a destructive change without --allow-destructive (dropping a "
+        "column, or a SQLite type change some rows can't be converted to), two models sharing a table, "
+        "a required foreign key added to a table with rows, or the database rejected the statement.",
         "Read the message: make the new field null=True or give it a default, rename the table, or run "
         "`jongo migrate --plan` to see what would change.",
     ),
@@ -492,7 +493,9 @@ CATALOGUE: dict[str, dict] = {
     "J410": _e(
         "Channel subscription refused",
         "The page asked to subscribe to a channel that isn't declared with @app.channel, has an invalid "
-        "name, or whose guard returned a falsy value. (A guard that returned nothing at all is J412.)",
+        "name, or whose guard returned a falsy value. (A guard that returned nothing at all is J412.) "
+        "It is also the 503 a stream gets when the process already holds jongo.live.MAX_SUBSCRIBERS "
+        "open live() connections; that one carries Retry-After.",
         "Declare the channel with @app.channel('pattern') and check its guard.",
     ),
     "J411": _e(
