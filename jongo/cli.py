@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import getpass
 import importlib
 import os
@@ -27,6 +28,12 @@ def die(message: str, code: int = 1, *, error: str | None = None, hint: str | No
     if error:
         print(_c(f"  more: jongo explain {error}", "2"), file=sys.stderr)
     raise SystemExit(code)
+
+
+def note(message: str, *, error: str | None = None):
+    """A warning that doesn't stop the command, on stderr, with its catalogue code."""
+    tag = f"[{error}] " if error else ""
+    print(_c("note: ", "33;1") + tag + message, file=sys.stderr)
 
 
 class AppLoadError(JongoError):
@@ -94,22 +101,120 @@ def load_app(target: str | None):
         die(f"{exc}{where}", error=exc.code, hint=exc.hint)
 
 
+def json_fail(code: str | None, message: str, hint: str | None = None, *, file: str | None = None,
+              line: int | None = None, exit_code: int = 1):
+    """The ``--json`` form of :func:`die`: ``{"ok": false, "error": {...}}`` on stdout, then exit.
+
+    A command run with ``--json`` always prints JSON, so a script or an agent never has to
+    fall back to reading stderr. ``code`` is ``None`` for a plain usage mistake.
+    """
+    import json
+
+    if hint is None and code:
+        hint = hint_for(code)
+    error = {"code": code, "message": message, "hint": hint, "file": file, "line": line}
+    print(json.dumps({"ok": False, "error": error}, indent=2))
+    raise SystemExit(exit_code)
+
+
+def fail(args, message: str, *, error: str | None = None, hint: str | None = None):
+    """Report a failure as JSON when the command was given ``--json``, else as :func:`die` does."""
+    if getattr(args, "json", False):
+        json_fail(error, message, hint)
+    die(message, error=error, hint=hint)
+
+
+def load_app_for(args):
+    """:func:`load_app`, except that with ``--json`` a failure is reported as JSON on stdout."""
+    if not getattr(args, "json", False):
+        return load_app(args.app)
+    try:
+        return _import_app(args.app)
+    except AppLoadError as exc:
+        d = load_error_dict(exc)
+        json_fail(d.get("code"), d["message"], d.get("hint"), file=d.get("file"), line=d.get("line"))
+
+
+def database_fail(args, exc: BaseException, doing: str):
+    """A database error, as JSON with ``--json``; otherwise the CLI's usual message (no traceback)."""
+    from .server import database_failure
+
+    if not getattr(args, "json", False):
+        raise database_failure(exc, doing) from None
+    from .errors import classify
+    from .monitor import redact
+
+    code, hint = classify(exc)
+    if code == "J000":
+        code, hint = "J303", hint_for("J303")
+    text = redact(str(exc)).strip()
+    json_fail(code, f"couldn't {doing}: {text.splitlines()[0] if text else type(exc).__name__}", hint)
+
+
+def write_output(args, text: str):
+    """Write ``-o FILE``; a path that can't be written is a coded error, not a traceback."""
+    try:
+        Path(args.output).write_text(text)
+    except OSError as exc:
+        fail(args, f"can't write {args.output}: {exc.strerror or exc}", error="J515")
+
+
+def port_number(text: str) -> int:
+    """argparse type for ``--port``: a whole number from 0 to 65535."""
+    try:
+        port = int(text)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a port number (a whole number from 0 to 65535)") from None
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"{port} isn't a port number (it must be from 0 to 65535)")
+    return port
+
+
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+#: OSError numbers that mean "can't listen on that address" when the server binds.
+_BIND_ERRNOS = {errno.EADDRINUSE, errno.EADDRNOTAVAIL, errno.EACCES, errno.EPERM, errno.EAFNOSUPPORT,
+                errno.EINVAL}
+
+
+def serve_or_die(app, host: str, port: int, **kwargs):
+    """``app.run()``; an address the server can't listen on is J505, not a traceback."""
+    import socket
+
+    from .server import EXIT_PORT_IN_USE
+
+    try:
+        app.run(host=host, port=port, **kwargs)
+    except (OSError, OverflowError) as exc:
+        if isinstance(exc, OSError) and not isinstance(exc, (socket.gaierror, socket.herror)) \
+                and exc.errno not in _BIND_ERRNOS:
+            raise
+        reason = getattr(exc, "strerror", None) or str(exc)
+        # A distinct exit status, so `jongo dev`'s reloader stops instead of waiting for an edit.
+        die(f"can't listen on {host}:{port}: {reason}", code=EXIT_PORT_IN_USE, error="J505")
+
+
 # ---------------------------------------------------------------------------
 
 
 def cmd_new(args):
     target = Path(args.name).resolve()
-    if target.exists() and any(target.iterdir()):
-        die(f"{target} already exists and isn't empty")
-    target.mkdir(parents=True, exist_ok=True)
-    name = target.name
-    for source in sorted(SCAFFOLD_DIR.rglob("*")):
-        if source.is_dir() or "__pycache__" in source.parts:
-            continue
-        relative = source.relative_to(SCAFFOLD_DIR)
-        dest = target / str(relative).replace("dot-", ".").replace(".tmpl", "")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(source.read_text().replace("{{name}}", name))
+    try:
+        if target.exists() and not target.is_dir():
+            die(f"{target} already exists and is a file", hint="pick another name for the project")
+        if target.exists() and any(target.iterdir()):
+            die(f"{target} already exists and isn't empty", hint="pick another name, or empty the directory")
+        target.mkdir(parents=True, exist_ok=True)
+        name = target.name
+        for source in sorted(SCAFFOLD_DIR.rglob("*")):
+            if source.is_dir() or "__pycache__" in source.parts:
+                continue
+            relative = source.relative_to(SCAFFOLD_DIR)
+            dest = target / str(relative).replace("dot-", ".").replace(".tmpl", "")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(source.read_text().replace("{{name}}", name))
+    except OSError as exc:
+        die(f"can't create the project at {args.name}: {exc.strerror or exc}", error="J515")
     print(f"\n  {_c('Created', '32;1')} {name}/\n")
     print(f"    cd {args.name}")
     print("    jongo dev\n")
@@ -126,12 +231,16 @@ def cmd_dev(args):
     os.environ["JONGO_DEV"] = "1"
     app = load_app(args.app)
     app.dev = True
-    app.run(host=args.host, port=args.port)
+    if args.host not in _LOCAL_HOSTS and not getattr(app, "allowed_hosts", None):
+        note("the dev server answers requests addressed to localhost or an IP address; any other host name "
+             "gets a 400. To reach it by name from another device (a .local name, a tunnel), list that name "
+             "in Jongo(allowed_hosts=[...]).", error="J214")
+    serve_or_die(app, args.host, args.port)
 
 
 def cmd_run(args):
     app = load_app(args.app)
-    app.run(host=args.host, port=args.port, migrate=args.migrate)
+    serve_or_die(app, args.host, args.port, migrate=args.migrate)
 
 
 def cmd_migrate(args):
@@ -165,7 +274,7 @@ def _migrate(args, db):
 
 
 def cmd_routes(args):
-    app = load_app(args.app)
+    app = load_app_for(args)
     if getattr(args, "json", False):
         import json
 
@@ -235,8 +344,11 @@ def cmd_build(args):
         raise SystemExit(1)
     js, build_hash = app.bundle()
     out = Path(app.root) / ".jongo" / "build"
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "app.js").write_text(js)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "app.js").write_text(js)
+    except OSError as exc:
+        die(f"can't write {out / 'app.js'}: {exc.strerror or exc}", error="J515")
     from .vdom import COMPONENTS
 
     print(_c("✓", "32;1"), f"compiled {len(COMPONENTS)} components → .jongo/build/app.js ({len(js) / 1024:.1f} KB, build {build_hash})")
@@ -292,10 +404,10 @@ def cmd_context(args):
 
     from .introspect import context, describe
 
-    app = load_app(args.app)
+    app = load_app_for(args)
     text = json.dumps(describe(app), indent=2) if args.json else context(app)
     if args.output:
-        Path(args.output).write_text(text.rstrip("\n") + "\n")
+        write_output(args, text.rstrip("\n") + "\n")
         print(_c("✓", "32;1"), f"wrote {args.output}")
     else:
         print(text, end="" if text.endswith("\n") else "\n")
@@ -310,7 +422,7 @@ def cmd_openapi(args):
     app = load_app(args.app)
     text = json.dumps(openapi(app, version=args.api_version, server_url=args.server), indent=2)
     if args.output:
-        Path(args.output).write_text(text + "\n")
+        write_output(args, text + "\n")
         print(_c("✓", "32;1"), f"wrote {args.output}")
     else:
         print(text)
@@ -350,31 +462,36 @@ def cmd_sessions(args):
     """List the sign-ins the server knows about, or revoke them."""
     import json
 
-    load_app(args.app)
+    load_app_for(args)
     from . import auth
-    from .server import database_failure
 
     try:
+        auth._ensure_table()
+        from .db import connection
+        from .db.migrate import live_tables
+
+        with connection.locked() as conn:
+            tables = live_tables(conn)
+        # No users table means nobody has signed in yet: nothing to list and nothing to revoke.
+        has_users = auth.User._meta.table in tables
+        has_sessions = has_users and auth.LoginSession._meta.table in tables
         user = None
         if args.user or args.revoke_user:
             name = args.revoke_user or args.user
-            user = auth.User.filter(username=name).first()
+            user = auth.User.filter(username=name).first() if has_users else None
             if user is None:
-                die(f"no user called {name!r}")
+                fail(args, f"no user called {name!r}", hint="`jongo sessions` lists who is signed in")
         if args.revoke_user:
             ended = auth.revoke_sessions(user)
             result = {"revoked": ended, "user": user.username}
         elif args.revoke is not None:
-            result = {"revoked": int(auth.revoke_session(args.revoke)), "session": args.revoke}
+            if not has_sessions or not auth.revoke_session(args.revoke):
+                fail(args, f"no active session #{args.revoke}: nothing was revoked",
+                     hint="`jongo sessions` lists the active sessions and their ids")
+            result = {"revoked": 1, "session": args.revoke}
         else:
-            auth._ensure_table()
-            from .db import connection
-            from .db.migrate import live_tables
-
-            with connection.locked() as conn:
-                has_table = auth.LoginSession._meta.table in live_tables(conn)
             rows = []
-            if has_table:  # no users table yet means nobody has ever signed in
+            if has_sessions:
                 found = auth.LoginSession.filter(user_id=user.id) if user is not None else auth.LoginSession.all()
                 names = {u.id: u.username for u in auth.User.all()}
                 rows = [{**row.to_dict(), "username": names.get(row.user_id)} for row in found]
@@ -382,7 +499,7 @@ def cmd_sessions(args):
     except SystemExit:
         raise
     except Exception as exc:
-        raise database_failure(exc, "read the sessions") from None
+        database_fail(args, exc, "read the sessions")
     if args.json:
         print(json.dumps(result, indent=2, default=str))
         return
@@ -443,7 +560,7 @@ def cmd_explain(args):
         return
     entry = explain(args.code)
     if entry is None:
-        die(f"unknown error code {args.code!r}", hint="`jongo explain --list` lists every code")
+        fail(args, f"unknown error code {args.code!r}", hint="`jongo explain --list` lists every code")
     if args.json:
         print(json.dumps(entry, indent=2))
     else:
@@ -488,12 +605,7 @@ def cmd_status(args):
 
 
 def _status_fail(args, code, message):
-    import json
-
-    if args.json:
-        print(json.dumps({"ok": False, "error": {"code": code, "message": message, "hint": hint_for(code)}}, indent=2))
-        raise SystemExit(1)
-    die(message, error=code, hint=hint_for(code))
+    fail(args, message, error=code, hint=hint_for(code))
 
 
 def format_status(data: dict, color: bool = False) -> str:
@@ -554,12 +666,14 @@ def main(argv=None):
 
     p = add("dev", cmd_dev, "run the dev server with auto-reload")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--port", type=port_number, default=8000)
     p.add_argument("--no-reload", action="store_true")
 
     p = add("run", cmd_run, "run a production server")
     p.add_argument("--host", default="0.0.0.0")
-    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)))
+    # A string default goes through port_number too, so a bad $PORT is reported by `jongo run` alone.
+    p.add_argument("--port", type=port_number, default=os.environ.get("PORT") or "8000",
+                   help="the port (default: $PORT, else 8000)")
     p.add_argument("--migrate", action="store_true", help="apply safe migrations on start")
 
     p = add("migrate", cmd_migrate, "sync the database schema with your models")
@@ -610,7 +724,7 @@ def main(argv=None):
     p = add("doctor", cmd_doctor, "check the app, the database, the settings and the environment; exit 1 on failure")
     p.add_argument("--json", action="store_true", help="the report as JSON")
     p.add_argument("--production", action="store_true", help="judge the settings as a production deploy")
-    p.add_argument("--port", type=int, default=None, help="also check that this port is free")
+    p.add_argument("--port", type=port_number, default=None, help="also check that this port is free")
 
     p = add("explain", cmd_explain, "explain an error code (J302) and how to fix it", app_arg=False)
     p.add_argument("code", nargs="?", help="an error code, e.g. J302")

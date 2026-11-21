@@ -91,6 +91,10 @@ def home():
 
 Four building blocks: `@app.page`, `@component`, `@server`, `db.Model`.
 
+Pass `__name__` as the first argument to `Jongo()`: it tells Jongo which file the app lives
+in, and the database path, the `.jongo/` key file and `static/` are found next to that file.
+An app built somewhere else (a factory, a test) can pass `root=` instead.
+
 ---
 
 ## 2. The mental model
@@ -146,6 +150,11 @@ def reports(request):
 - Converters: `<str:x>` (default), `<int:x>`, `<float:x>`, `<slug:x>`, `<uuid:x>`,
   `<path:x>`. A type annotation on the parameter works too: `/posts/<id>` with `id: int`.
 - A page function may take `request` and/or its path parameters; take what you need.
+- Any other parameter is read from the query string and checked against its annotation:
+  `page: int = 1` reads `?page=2`; a `bool` accepts `true`/`false`, `1`/`0`, `on`/`off` and
+  `yes`/`no` in any case; `list[int]` collects a repeated key (`?ids=1&ids=2`); `date`,
+  `datetime`, `UUID`, `Decimal` and `Enum` arrive converted. A value that doesn't fit is a
+  400 (`J211`), not an exception in your function.
 - `@app.route(path, methods=("POST",))` registers a plain handler for forms, webhooks and
   files. Return a `Response`, a `str` of HTML, a `dict`/`list` (sent as JSON) or a UI tree.
 - `@app.get` and `@app.post` are shorthands.
@@ -304,12 +313,21 @@ updated = await rename(todo["id"], new_title)
 
 - **Only decorated functions are reachable.** Nothing else is exposed.
 - **Arguments are checked against your type hints before your code runs.** A wrong type is
-  a clean 400, not a crash inside your function. Supported: `str`, `int`, `float`, `bool`,
-  `list[...]`, `dict[K, V]`, `None`-able types, and model classes.
+  a clean 400 (`J403`), not a crash inside your function. Supported: `str`, `int`, `float`,
+  `bool`, `list[...]`, `tuple[...]`, `set[...]`, `dict[K, V]`, `None`-able types and unions,
+  `Literal[...]`, dataclasses, `TypedDict`, a `forms.Schema` ([§23](#23-form-schemas-one-set-of-rules-for-the-browser-and-the-server)),
+  model classes, and, sent from the browser as strings, `date`, `datetime` and `time`
+  (ISO 8601; a trailing `Z` is accepted), `UUID`, `Decimal` (finite values only), `bytes`
+  (base64) and `Enum` members (by value). Any other annotation is refused when the function
+  is defined (`J405`), so no argument reaches your code unchecked; annotate a parameter
+  `Any` to take any JSON and check it yourself.
 - **A model parameter loads the row** by id, or returns 404 if it does not exist.
 - **`request` is always the first parameter**, with `request.user`, `request.session` and
   the rest.
-- **Return** anything JSON-able, or `redirect(...)`.
+- **Return** anything JSON-able, or `redirect(...)` to a path on this site or an `http(s)` URL.
+  Any other target (`javascript:`, `data:`) is refused with a 500 (`J408`) instead of being
+  handed to the browser. A target that came from the user must pass `is_local_url()` first
+  ([§14](#14-security)).
 - **Raise** `Forbidden` or `NotFound` to send a status and a message the browser can read,
   or `db.ValidationError({"email": "..."})` to send field errors:
 
@@ -401,8 +419,9 @@ class Book(db.Model):
 
 **Fields:** `Text Int Float Bool DateTime Date JSON ForeignKey`. Common options:
 `null`, `blank`, `default`, `unique`, `index`, `choices`, `max_length`, `label`,
-`help_text`; `DateTime` adds `auto_now` and `auto_now_add`; `ForeignKey` adds
-`related_name` and `on_delete` (`CASCADE`, `SET NULL`, `RESTRICT`, `NO ACTION`).
+`help` (the help text forms and the admin show; `help_text` is accepted as an alias);
+`DateTime` adds `auto_now` and `auto_now_add`; `ForeignKey` adds `related_name` and
+`on_delete` (`CASCADE`, `SET NULL`, `RESTRICT`, `NO ACTION`).
 
 **Queries** are lazy and chainable; nothing runs until you iterate, slice or count.
 
@@ -526,6 +545,14 @@ def Chat(room):
 - `live()` follows the component: it subscribes on mount, moves when the channel changes,
   and unsubscribes on unmount. One SSE connection per tab carries every channel the page
   asked for, and reconnects with backoff.
+- That connection may carry at most `MAX_CHANNELS` (20) channels, and a channel name is at
+  most `MAX_CHANNEL_LENGTH` (200) characters. Both live in the `jongo.live` module (import
+  them with `from jongo.live import MAX_CHANNELS`; `from jongo import live` is the hook).
+  Because the tab has one stream, the limit counts every `live()` on the page together:
+  thirty rows that each call `live(f"row:{id}")` ask for thirty channels, and the stream is
+  refused (403, `J210`, with a message naming the limit). Under `jongo dev` the browser
+  reports it in the console and stops retrying. Use one channel for the list and put the row
+  id in the message.
 - `broadcast()` returns how many connections it reached. Anything that can call a function
   can push: a request handler, a thread, a cron job, a queue worker.
 - It is a **live feed, not a queue.** A browser that reconnects sees what happens next, not
@@ -542,15 +569,39 @@ def Chat(room):
 ```python
 from jongo.auth import User, authenticate, login, logout
 
-user = User.create_user(username="ann", password="s3cret")
-user = authenticate("ann", "s3cret")       # None if wrong
+user = User.create_user(username="ann", password="s3cret")   # hashes the password
+user = authenticate("ann", "s3cret", request)   # None if wrong; `request` adds the per-address throttle
 login(request, user)
 logout(request)
 request.user                                # None when signed out
 ```
 
+Make accounts with `User.create_user(username, password, **fields)`, and change a password
+with `user.set_password(raw)` then `user.save()`. Never `User.create(password=...)`: that
+would store the password as typed, so `save()` refuses a `password` that isn't a hash
+(`J304`).
+
 `@app.page("/x", login_required=True)` redirects anonymous visitors to `login_url` with a
-`?next=` parameter; `admin_required=True` also requires a staff account.
+`?next=` parameter; `admin_required=True` also requires a staff account. `login_url` is
+`/login` unless you pass `Jongo(login_url=...)`, and Jongo doesn't provide that page: define
+it yourself ([02_auth.py](../examples/patterns/02_auth.py) is a complete one).
+
+`?next=` comes from the URL, so anyone can send a link whose `next` is their own site. After
+signing in, redirect to it only when `is_local_url()` says it is a path on this site; it
+refuses `https://…`, `//host` and `/\host`:
+
+```python
+from jongo import is_local_url             # also jongo.http.is_local_url
+
+@app.route("/login", methods=("POST",))
+def do_login(request):
+    user = authenticate(request.form.get("username", ""), request.form.get("password", ""), request)
+    if user is None:
+        return redirect("/login?error=1")
+    login(request, user)
+    target = request.form.get("next") or "/"
+    return redirect(target if is_local_url(target) else "/")
+```
 
 Sessions are HMAC-signed cookies: `request.session["cart"] = [...]`. Passwords are
 PBKDF2-SHA256, salted and compared in constant time; changing one signs out that user's
@@ -576,37 +627,81 @@ What Jongo does by default:
 - **A type-checked border.** `@server` arguments are validated against your hints before
   your code runs. Only decorated functions are exposed. The same applies to channels.
 - **CSRF.** Every state-changing call carries a token signed with your secret and bound to
-  the origin. Cross-origin `Origin` headers are rejected.
+  the origin. Cross-origin `Origin` headers are rejected (scheme included), and the token is
+  replaced at sign-in and sign-out.
+- **The Host header.** `jongo dev` answers requests addressed to `localhost`, a
+  `*.localhost` name or an IP address; any other host name gets a 400 (`J214`), so a page you
+  visit can't reach your dev server through a domain it controls (DNS rebinding) and read
+  the debug pages or call your server functions. To reach the dev server by a name (a
+  tunnel, `mymac.local`), list it: `Jongo(__name__, allowed_hosts=["mymac.local"])`;
+  `".example.com"` or `"*.example.com"` also allows subdomains. In production the check
+  applies only when `allowed_hosts` is set; set it unless a proxy in front already checks
+  `Host`.
+- **Framing.** Pages are sent with `X-Frame-Options: SAMEORIGIN` and, when the response has
+  no `Content-Security-Policy` of its own, `frame-ancestors 'self'`, so another site can't
+  load them in an invisible frame (clickjacking). `Jongo(frame_options="DENY")` forbids
+  framing entirely; `frame_options=None` sends neither header. The admin always sends `DENY`.
+- **Redirects.** `is_local_url(url)` (`jongo.is_local_url`) is true only for a path on this
+  site. Check any redirect target that came from a request with it, such as a sign-in
+  form's `?next=` ([§13](#13-auth-sessions-and-the-admin)).
 - **Sessions** are signed and revocable: each sign-in is a row on the server, and a cookie
   whose row is gone is refused. **Passwords** are PBKDF2-SHA256.
 - **Password guessing is throttled.** `authenticate()` stops checking after 10 wrong
-  passwords for one username in 5 minutes and answers 429. `rate_limit=` puts the same cap
-  on any server function, page or route ([§24](#24-rate-limits-and-revocable-sessions)).
+  passwords for one username in 5 minutes and answers 429. `rate_limit=` puts a cap on any
+  server function, page or route, counted per address and, for a signed-in caller, per
+  user as well ([§24](#24-rate-limits-and-revocable-sessions)).
 - **Channel guards fail closed.** A guard that returns nothing refuses the subscription.
 - **Form input is whitelisted.** A `forms.Schema` returns only the fields it declares.
-- **Limits.** Request bodies are capped; a bogus `Content-Length` is rejected before the
-  body is read.
+- **Limits.** Request bodies are capped at `Request.max_body_size` (16 MB), and forms at
+  `Request.max_form_fields` and `Request.max_form_parts` (1000 each); over a limit the answer
+  is a 413 (`J212`) before the body is parsed. A bogus `Content-Length` is rejected before
+  the body is read. Raise them on the class for an app that needs more:
+  `Request.max_form_fields = 5000`.
 - **`to_dict()`** never includes password hashes.
 
 What you still have to do: set `JONGO_SECRET_KEY` in production, authorise your own
 channels and server functions (`request.user` is there, Jongo will not guess your rules),
-validate uploads, and keep secrets out of components.
+validate uploads, check redirect targets that come from the user with `is_local_url()`,
+set `allowed_hosts` in production when nothing in front of the app checks `Host`, and keep
+secrets out of components.
 
 ---
 
 ## 15. Testing
 
+`TestClient(app)` runs requests against the database the app is configured with, so tests
+would read and write your development data. Give each test a fresh in-memory database
+instead, with an autouse fixture in `tests/conftest.py` (`jongo new` writes this file):
+
 ```python
+import pytest
+from jongo import db
+
+@pytest.fixture(autouse=True)
+def fresh_database():
+    db.configure(":memory:")   # a new, empty database for this test
+    db.migrate()               # create the table for every model
+    yield
+    db.close_connections()
+```
+
+```python
+from jongo import ServerError
 from jongo.testing import TestClient
 
 client = TestClient(app)
 
-client.get("/")                       # a real WSGI round trip
+response = client.get("/")            # a real WSGI round trip
+response.status, response.text        # 200 (an int), the body; response.json() for JSON
 client.post("/login", data={...})     # CSRF handled like a browser
-client.rpc(add_todo, "Write tests")   # call a @server function over HTTP
+client.rpc(add_todo, "Write tests")   # call a @server function over HTTP; returns its result
 client.navigate("/")                  # the JSON tree the in-browser router fetches
 client.login(user)                    # sign in (records the session, as auth.login does)
 response, chunks = client.stream("/_jongo/live?channels=prices")   # SSE, unconsumed
+
+with pytest.raises(ServerError) as refused:   # a refused call raises, as it does in the browser
+    client.rpc(add_todo, 42)
+assert refused.value.status == 400 and refused.value.code == "J403"
 ```
 
 See [12_testing.py](../examples/patterns/12_testing.py) for the whole set in one file.
@@ -617,7 +712,7 @@ See [12_testing.py](../examples/patterns/12_testing.py) for the whole set in one
 
 | Command | |
 |---|---|
-| `jongo new NAME` | create a project |
+| `jongo new NAME` | create a project: `app.py`, `AGENTS.md`, and `tests/` with a fresh-database fixture |
 | `jongo dev [app.py] [--port]` | dev server: auto-reload, live browser reload, error overlay |
 | `jongo run [--host --port --migrate]` | production server (threaded) |
 | `jongo migrate [--plan] [--allow-destructive]` | sync the schema |
@@ -633,6 +728,12 @@ See [12_testing.py](../examples/patterns/12_testing.py) for the whole set in one
 | `jongo openapi [-o FILE] [--api-version V] [--server URL]` | the OpenAPI 3.1 document, generated from the type hints — see [§25](#25-openapi-and-json-schema) |
 | `jongo mcp [--list] [--read-only] [--user NAME]` | serve the app to a coding agent over MCP on stdin/stdout — see [§26](#26-mcp-the-app-as-tools-for-a-coding-agent) |
 | `jongo sessions [--user NAME] [--revoke ID] [--revoke-user NAME] [--json]` | list the active sign-ins, or revoke them — see [§24](#24-rate-limits-and-revocable-sessions) |
+
+A command given `--json` answers in JSON even when it fails: `{"ok": false, "error": {"code",
+"message", "hint", "file", "line"}}` on stdout, exit status 1 (`code` is `null` for a plain
+usage mistake). `--port` must be a number from 0 to 65535. A failure is a message with its code,
+never a Python traceback, except that an app that fails to import prints its own traceback
+first (`JONGO_TRACEBACK=0` turns that off).
 
 ---
 
@@ -650,6 +751,9 @@ JONGO_SECRET_KEY=... python -m gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
 - Use one worker with threads if you use channels (the hub is per process).
 - Set `trust_proxy=True` only behind a proxy you control; it makes Jongo believe
   `X-Forwarded-Proto`.
+- Set `Jongo(allowed_hosts=["myapp.example.com"])` unless a proxy in front already refuses
+  other `Host` names; requests for any other host get a 400 (`J214`). Production doesn't
+  check `Host` until you set it.
 - Serve behind TLS. Cookies are marked `Secure` when the request is HTTPS.
 - Console-script shebangs are sometimes broken by build packs: `python -m gunicorn` is the
   reliable spelling.
@@ -692,11 +796,27 @@ system, and modules that only exist on the server.
   still work.
 - `isinstance` cannot tell an int from a float (`isinstance(5, float)` is True).
   `isinstance(True, int)` is correct.
+- Integers past 2⁵³ (9007199254740992) lose precision: there is one number type. Do exact
+  or big-integer arithmetic in a `@server` function.
+- A dict whose keys look like non-negative integers (`{2: "b", 1: "a"}`, or `{"10": …,
+  "9": …}`) iterates those keys in ascending numeric order, ahead of the other keys, instead
+  of insertion order. When order matters, keep a list (of pairs, or of keys) beside the dict.
+- A generator expression builds its whole list before the consumer sees it, so
+  `any(check(x) for x in xs)` and `all(...)` call `check` for every item instead of stopping
+  at the first answer. The result is the same; write a loop with `break` when the calls are
+  expensive or have side effects.
 
 Tuples are real tuples — `(1, 2) != [1, 2]`, immutable, and `enumerate`/`zip`/`.items()`
 yield them — and strings are measured and indexed in code points, so `len("😀")` is 1.
-Both are checked by a parity suite that runs every sample in CPython and in Node and
-compares the results.
+Errors are Python's too: `/`, `//`, `%` and `**` by zero raise `ZeroDivisionError`, ordering
+`None` or mixed types (`None < 1`, `"a" < 1`) raises `TypeError`, and `float("")` raises
+`ValueError`. All of this is checked by a parity suite that runs every sample in CPython and
+in Node and compares the results.
+
+**One limit that isn't about the browser:** the first argument to `Jongo()` should be
+`__name__`, or pass `root=`. The app finds its database file, `.jongo/secret` and `static/`
+next to the module it names; given a name that isn't an imported module, it uses the file
+that created it, and logs a warning if it has to fall back to the current directory.
 
 ---
 
@@ -746,7 +866,8 @@ jongo context -o AGENTS.md    # write it
 `import` inside a function, a server function whose annotation cannot be resolved:
 `jongo check` finds them without starting a server and reports each with the file, the line
 and a hint. With `--json` the report is something an agent can act on in a loop, and the exit
-code is 1 when there is a problem, so the same command gates CI:
+code is 1 when there is a problem, so the same command gates CI. Every `--json` command
+answers in JSON even when it fails, as `{"ok": false, "error": {...}}`:
 
 ```bash
 jongo check --json
@@ -823,6 +944,12 @@ subscribers, and — while SQL timing is on (dev, or `JONGO_LOG_LEVEL=DEBUG`) �
 the same statement five or more times. It is in-process, standard library only, and costs one
 short locked append per request. From Python: `jongo.status(app)` returns the same dict.
 
+Its `mode` is how the app is running: `dev` under `jongo dev`, otherwise `production`, which
+includes `jongo run` on your own machine and the app inside `jongo mcp`. That is not the
+doctor's verdict: `jongo doctor` reports `"production": true` only when it judges the settings
+as a deploy (`--production`, `JONGO_ENV=production`, or a hosting platform's variables), so the
+two can disagree on a laptop without contradicting each other.
+
 It never records query strings, headers, cookies, bodies, form values or SQL parameters, never
 shows the database URL, and strips `user:password@` from error messages.
 
@@ -894,7 +1021,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J209` | Admins only | Sign in as a user with is_admin=True (`jongo createadmin` makes one). |
 | `J210` | Forbidden | Check the permission condition that raised it; this is usually the app working as intended. |
 | `J211` | Query parameter has the wrong type | Fix the link or form that builds the URL, or give the parameter a type that accepts the value (str, Optional[int]) and handle it in the function. |
-| `J212` | Malformed request body | Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for larger uploads raise jongo.Request.max_body_size (16 MB by default). |
+| `J212` | Malformed request body | Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for larger uploads raise jongo.Request.max_body_size (16 MB by default), for bigger forms Request.max_form_fields / max_form_parts. |
 | `J213` | Too many requests (rate limit) | Wait for the Retry-After seconds. If the limit is too tight, raise it where it is set (rate_limit="30/minute", or jongo.auth.LOGIN_ATTEMPTS / LOGIN_WINDOW for sign-in). |
 | `J214` | Host not allowed | Open the app as localhost or 127.0.0.1, or list the host: Jongo(__name__, allowed_hosts=["myapp.test"]) (a leading dot, ".example.com", also allows subdomains). |
 
@@ -922,10 +1049,10 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J402` | Malformed server function call | Call server functions from browser code with await fn(...), or from tests with client.rpc(fn, ...). |
 | `J403` | Server function argument has the wrong type | Send the annotated type (convert in the browser: int(draft.value)), or change the annotation. |
 | `J404` | Server function arguments don't match its signature | Call it with the parameters in its signature (`jongo context` lists every signature). |
-| `J405` | Server function type hint can't be resolved | Define the annotated type (e.g. the model) at module level where the function can see it, or drop the annotation. |
+| `J405` | Server function type hint can't be resolved | Define the annotated type (e.g. the model) at module level where the function can see it, annotate with one of the checked types, or use Any to take any JSON and check it yourself. |
 | `J406` | Two server functions share an id | Move them to module level, or give each a distinct name. |
 | `J407` | Server function raised an exception | Read the traceback in the log or `jongo status`; raise NotFound/Forbidden/ValidationError for errors the browser may read. |
-| `J408` | Server function returned an unsupported response | Return JSON-able data, or redirect(url). |
+| `J408` | Server function returned an unsupported response | Return JSON-able data, or redirect(url) to a path on this site (check user-supplied targets with jongo.is_local_url) or an http(s) URL. |
 | `J410` | Channel subscription refused | Declare the channel with @app.channel('pattern') and check its guard. |
 | `J411` | Model argument names a row that doesn't exist | Check the id the browser sends (the row may have been deleted); handle the 404 in the browser. |
 | `J412` | Channel guard gave no answer | Return True to allow the subscription and False to refuse it, on every path through the guard. |
@@ -941,7 +1068,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J502` | Dev mode is on | Don't set JONGO_DEV=1 or dev=True in production; run with `jongo run`. |
 | `J503` | App file not found | Run the command inside the project, pass the file (jongo check path/to/app.py), or create one with `jongo new`. |
 | `J504` | No Jongo app in the module | Add app = Jongo(__name__) to the module, or name it: jongo check module:attr. |
-| `J505` | Port already in use | Use another port (--port 8001) or stop the other process. |
+| `J505` | Port in use, or the address can't be listened on | Use another port (--port 8001) or stop the other process; check --host (127.0.0.1 for this machine only, 0.0.0.0 for every interface). |
 | `J506` | Static directory missing | Create static/ next to app.py and put the files there. |
 | `J507` | Cookies won't be marked Secure behind a proxy | Behind a proxy you control, create the app with Jongo(..., trust_proxy=True). |
 | `J508` | Status endpoint refused | Set JONGO_STATUS_TOKEN on the server and run `jongo status --url ... --token $JONGO_STATUS_TOKEN`. |
@@ -951,6 +1078,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J512` | Can't reach the running server | Start the app (`jongo dev`) and pass its address: jongo status --url http://127.0.0.1:8000 |
 | `J513` | Rate limit can't be read | Write it as "5/minute", "100/hour", "10 per 30 seconds", or a (count, seconds) pair. |
 | `J514` | MCP endpoint mounted but nobody can use it | Set JONGO_MCP_TOKEN to a long random value (python -c "import secrets; print(secrets.token_urlsafe(32))"), or remove app.mcp() from the production app. |
+| `J515` | Can't write the file or directory | Pass a path inside a directory that exists and that you can write to (create it first with mkdir -p), with a shorter name if the system says it is too long. |
 
 ---
 
@@ -1015,6 +1143,10 @@ def SignupForm():
 
 `forms.Schema.from_model(Invite, only=..., exclude=...)` builds a schema from a model's
 fields (`max_length`, `choices`, `blank`, the type), so the form can't drift from the table.
+`only=[...]` keeps just the fields named and `exclude=[...]` drops some. Fields that should
+never come from a form (`is_admin`, `is_staff`, `is_superuser`, `password`) are left out
+unless `only=` names them, with a warning outside production; name one in `only=` if a form
+really should set it.
 
 **Using a schema.**
 
@@ -1078,9 +1210,14 @@ def webhook(request): ...
 def report(): ...
 ```
 
-The caller is the signed-in user when there is one, and the client address otherwise. Over
-the limit the function doesn't run: the response is `429` with a `Retry-After` header and
-the code `J213`. Rates are written `"5/minute"`, `"100/hour"`, `"3/s"`, `"10 per 30 seconds"`
+Each request counts against the client address and, when someone is signed in, against that
+user as well; it is refused when either count is over the limit (and then neither is charged).
+So signing up a fresh account for every request, or switching accounts, doesn't reset the
+address's count. Many signed-in users behind one address (an office, a proxy without
+`trust_proxy=True`) share its count: raise `ratelimit.ADDRESS_FACTOR` (default `1`) to give the
+address a multiple of the limit, or set it to `None` to count signed-in users per user only. Over the limit
+the function doesn't run: the response is `429` with a `Retry-After` header and the code
+`J213`. Rates are written `"5/minute"`, `"100/hour"`, `"3/s"`, `"10 per 30 seconds"`
 or as a `(count, seconds)` pair; a rate that can't be read fails when the function is
 registered (`J513`), not on the first request. The window slides, so a burst can't straddle a
 boundary and get through twice.
@@ -1262,7 +1399,7 @@ claude mcp add --transport http myapp http://127.0.0.1:8000/_jongo/mcp
 | `jongo_check` | compile, resolve hints, check channel guards, plan migrations (`jongo check --json`) |
 | `jongo_doctor` | the health report; `production=true` judges it as a deploy |
 | `jongo_explain` | what an error code means and how to fix it; with no code, every code |
-| `jongo_status` | recent requests, errors with tracebacks, per-route counters, N+1 queries |
+| `jongo_status` | recent requests, errors with tracebacks, per-route counters, N+1 queries; `mode` is `production` under `jongo mcp` because dev mode is off ([§21](#21-diagnostics-doctor-explain-status)) |
 | `jongo_openapi` | the OpenAPI document |
 | `jongo_get` | GET a path in-process: `{status, content_type, body}`, to confirm a page renders |
 | *one per `@server` function* | the function's result; its input schema comes from the type hints |

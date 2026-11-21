@@ -343,10 +343,13 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J212": _e(
         "Malformed request body",
-        "The request body couldn't be read: it isn't valid JSON, the Content-Length header is invalid, "
-        "or it is larger than the app's limit (max_body_size).",
+        "The request body couldn't be read: it isn't valid JSON, the "
+        "Content-Length header is invalid, it is larger than the app's limit (Request.max_body_size), or "
+        "a form has more fields or multipart parts than Request.max_form_fields / Request.max_form_parts "
+        "allow (1000 each). Oversized bodies and forms are refused with a 413 before they are parsed.",
         "Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for "
-        "larger uploads raise jongo.Request.max_body_size (16 MB by default).",
+        "larger uploads raise jongo.Request.max_body_size (16 MB by default), for bigger forms "
+        "Request.max_form_fields / max_form_parts.",
     ),
     "J213": _e(
         "Too many requests (rate limit)",
@@ -457,9 +460,14 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J405": _e(
         "Server function type hint can't be resolved",
-        "A parameter annotation names a type Jongo can't find. Without it the argument can't be "
-        "validated, so the function refuses to run.",
-        "Define the annotated type (e.g. the model) at module level where the function can see it, or drop the annotation.",
+        "A parameter annotation names a type Jongo can't find, or one it doesn't know how to check. "
+        "Without it the argument can't be validated, so the function refuses to run; an annotation Jongo "
+        "can't check (Callable, a plain class, type[X]) is refused when the function is defined. The types "
+        "it checks: str, int, float, bool, None, list/tuple/set/dict, Optional and unions, Literal, "
+        "dataclasses, TypedDict, NewType, Annotated, models, forms.Schema, date/datetime/time, UUID, "
+        "Decimal, bytes (base64) and Enum.",
+        "Define the annotated type (e.g. the model) at module level where the function can see it, annotate "
+        "with one of the checked types, or use Any to take any JSON and check it yourself.",
     ),
     "J406": _e(
         "Two server functions share an id",
@@ -475,8 +483,11 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J408": _e(
         "Server function returned an unsupported response",
-        "A server function may return data or redirect(); other Response objects can't be sent back to a server call.",
-        "Return JSON-able data, or redirect(url).",
+        "A server function may return data or redirect(); other Response objects can't be sent back to a "
+        "server call, and neither can a redirect to anything but a relative or http(s) URL (a javascript: "
+        "or data: target is refused rather than handed to the browser).",
+        "Return JSON-able data, or redirect(url) to a path on this site (check user-supplied targets with "
+        "jongo.is_local_url) or an http(s) URL.",
     ),
     "J410": _e(
         "Channel subscription refused",
@@ -546,9 +557,13 @@ CATALOGUE: dict[str, dict] = {
         "Add app = Jongo(__name__) to the module, or name it: jongo check module:attr.",
     ),
     "J505": _e(
-        "Port already in use",
-        "Another process is listening on the port.",
-        "Use another port (--port 8001) or stop the other process.",
+        "Port in use, or the address can't be listened on",
+        "The server couldn't listen on the host and port it was given: another process is already "
+        "listening on the port, the host isn't an address of this machine (or doesn't resolve), or the "
+        "port needs privileges (below 1024 on most systems). A --port outside 0-65535 is refused before "
+        "anything starts.",
+        "Use another port (--port 8001) or stop the other process; check --host (127.0.0.1 for this machine "
+        "only, 0.0.0.0 for every interface).",
     ),
     "J506": _e(
         "Static directory missing",
@@ -599,6 +614,15 @@ CATALOGUE: dict[str, dict] = {
         "The variable is unset or shorter than 16 characters, so every request is refused (J420).",
         "Set JONGO_MCP_TOKEN to a long random value (python -c \"import secrets; print(secrets.token_urlsafe(32))\"), "
         "or remove app.mcp() from the production app.",
+    ),
+    "J515": _e(
+        "Can't write the file or directory",
+        "A CLI command couldn't create or write the path it was given: `jongo new NAME` (the project "
+        "directory), `jongo context -o FILE`, `jongo openapi -o FILE` or `jongo build` (.jongo/build/). "
+        "The parent directory doesn't exist or isn't writable, or the name is too long for the file system.",
+        "Pass a path inside a directory that exists and that you can write to (create it first with mkdir -p), "
+        "with a shorter name if the system says it is too long.",
+        "jongo context -o docs/AGENTS.md     # J515 until docs/ exists: mkdir -p docs",
     ),
 }
 

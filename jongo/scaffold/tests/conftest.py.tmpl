@@ -1,0 +1,21 @@
+"""Test setup for {{name}}: every test gets a fresh, empty in-memory database.
+
+Without this fixture, TestClient(app) reads and writes the app's real database
+(db.sqlite3): tests would leave rows behind and see each other's data.
+"""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # so the tests can `import app`
+
+from jongo import db  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def fresh_database():
+    db.configure(":memory:")  # a new, empty database for this test
+    db.migrate()              # create the table for every model
+    yield
+    db.close_connections()

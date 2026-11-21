@@ -458,7 +458,8 @@ def _t_describe(server, args, request):
     if section is None:
         return described
     if section not in described:
-        raise HTTPError(400, f"no section {section!r}; choose one of {', '.join(described)}", code="J422")
+        raise HTTPError(400, f"no section {section!r}; choose one of {', '.join(described)}", code="J422",
+                        hint=f"pass section as one of {', '.join(described)}, or leave it out for the whole map")
     return {section: described[section]}
 
 
@@ -509,7 +510,8 @@ def _t_get(server, args, request):
 
     path = args.get("path")
     if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
-        raise HTTPError(400, "path must be a path on this app, starting with /", code="J422")
+        raise HTTPError(400, "path must be a path on this app, starting with /", code="J422",
+                        hint='pass a path such as "/" or "/todos/3?page=2": one leading slash, no scheme or host')
     inner = Request(_local_environ("GET", path), server.app)
     inner.user = server._request(request).user
     response = server.app.handle(inner)

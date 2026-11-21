@@ -363,8 +363,9 @@ Unsupported code is a compile error at start-up; `jongo check` reports the file,
 server data straight from props and keep in state only what the browser owns.
 - **The browser calls the server with `await`.** Only `@server` functions are reachable: \
 `todo = await add_todo(draft.value)` inside an event handler. Arguments are validated against the type \
-hints before the function runs (`str`, `int`, `float`, `bool`, `list[...]`, `dict[...]`, `Optional`, and \
-model classes: a parameter annotated `todo: Todo` receives the row for the id the browser sent, or 404). \
+hints before the function runs (`str`, `int`, `float`, `bool`, `list[...]`, `dict[...]`, `Optional`, \
+`date`/`datetime`, `UUID`, `Decimal`, `Enum`, and model classes: a parameter annotated `todo: Todo` receives \
+the row for the id the browser sent, or 404); any other annotation is refused at start-up (J405). \
 A first parameter named `request` receives the request (`request.user`, `request.session`). \
 `@server(login_required=True)` requires a signed-in user. Raise `Forbidden`, `NotFound` or \
 `db.ValidationError({"field": "message"})` for errors the browser may read; any other exception is a bare \
@@ -386,17 +387,27 @@ and `jongo migrate` (no migration files). Query with `Model.all()`, `.filter(fie
 - **Real time**: `@app.channel("room:<int:id>")` declares a channel and its function decides who may \
 subscribe; `broadcast(channel, data)` pushes from anywhere on the server; `live(channel, handler)` in a \
 component receives it. An undeclared channel cannot be subscribed to, and the guard must `return True` to \
-allow one: returning nothing refuses (J412).
+allow one: returning nothing refuses (J412). A tab listens on one stream of at most 20 channels in all, so \
+give a list one channel and put the row id in the message instead of a channel per row.
 - **Styles** are Python: `s = css(card={"padding": 12, ":hover": {...}})` then `class_=s.card`; \
 `global_css({...})` for page-wide rules.
 - **Auth, sessions, CSRF and the admin are built in**: `app.admin()` mounts the admin; `jongo createadmin` \
-makes a user; `login_required=True` on pages, routes and server functions. `authenticate(username, password, \
-request)` throttles wrong passwords by itself (429, J213); `auth.revoke_sessions(user)` signs a user out \
-everywhere. `rate_limit="5/minute"` on `@server`, `@app.page` or `@app.route` caps one caller.
+makes a user; `login_required=True` on pages, routes and server functions. Sign-up is \
+`User.create_user(username, password, **fields)`, which hashes the password; never `User.create(password=...)` \
+(`save()` refuses a password that isn't a hash). A `login_required` page redirects to `login_url` (default \
+`/login`) with `?next=`: define that page yourself, and after `login()` redirect to `next` only if \
+`is_local_url(next)`. `authenticate(username, password, request)` throttles wrong passwords by itself (429, \
+J213); `auth.revoke_sessions(user)` signs a user out everywhere. `rate_limit="5/minute"` on `@server`, \
+`@app.page` or `@app.route` caps one caller (counted per address and per signed-in user).
 - **Browser differences** (JavaScript's value model): `str(10 / 2)` is `"5"` (format explicitly), a dict \
-keyed by ints iterates string keys, `isinstance(5, float)` is `True`. Tuples and strings behave as in Python.
+keyed by ints iterates string keys in ascending order (not insertion order), `isinstance(5, float)` is `True`, \
+integers past 2**53 lose precision, and generator expressions are eager (`any()`/`all()` don't stop early). \
+Tuples and strings behave as in Python.
 - **Test through the real stack**: `from jongo.testing import TestClient`; `client = TestClient(app)`; \
-`client.get("/")`, `client.post(...)`, `client.rpc(add_todo, "title")`, `client.login(user)`.
+`client.get("/")`, `client.post(...)`, `client.rpc(add_todo, "title")`, `client.login(user)`. `TestClient` uses \
+the app's configured database, so `tests/conftest.py` needs an autouse fixture that gives each test a fresh \
+one: `db.configure(":memory:")`, `db.migrate()`, `yield`, `db.close_connections()` (`jongo new` writes it). \
+`response.status` is an int; a refused `client.rpc(...)` raises `ServerError` with `.status`, `.code`, `.errors`.
 - **Zero dependencies.** Don't add a package to solve something the framework already does."""
 
 

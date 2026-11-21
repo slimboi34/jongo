@@ -12,7 +12,7 @@ There's no template language, no separate JS project and no build step. It has z
 from jongo import Jongo, component, db, server, state
 from jongo.html import *
 
-app = Jongo(__name__, database="db.sqlite3")
+app = Jongo(__name__, title="Todos", database="db.sqlite3")
 
 
 class Todo(db.Model):                       # a database table
@@ -104,12 +104,12 @@ def post(request, id: int, preview: bool = False):   # `id: int` makes the route
 ```
 
 - **Path parameters** use `<name>` or `<converter:name>`, with the converters `str int float slug path uuid`. An annotation like `id: int` picks the converter for you.
-- **Arguments** are filled by name. `request` is the current request, path parameters come from the URL, and anything else is read from the query string and type-checked.
+- **Arguments** are filled by name. `request` is the current request, path parameters come from the URL, and anything else is read from the query string and type-checked: a `bool` accepts `true`/`false`, `1`/`0`, `on`/`off`, `yes`/`no`, and `list[int]` collects a repeated key (`?ids=1&ids=2`). A value that doesn't fit is a 400 (`J211`).
 - **A page returns** UI, `Page(ui, title=..., status=..., head=[...])`, or a `Response`, such as `redirect("/login")`.
 - **Plain handlers:** `@app.get`, `@app.post` and `@app.route(path, methods=[...])` return a `Response`, HTML `str`, JSON-able `dict`/`list`, or UI.
 - **Layouts:** `@app.layout` wraps every page in a component. When a link switches pages, the layout's state survives.
 - **Errors:** raise `NotFound("...")`, `Forbidden()` or `HTTPError(status, message)`, and customise the page with `@app.errorhandler(404)`.
-- **Access control:** `login_required=True` and `admin_required=True` work on pages and routes.
+- **Access control:** `login_required=True` and `admin_required=True` work on pages and routes. An anonymous visitor is redirected to `login_url` (`/login` by default) with `?next=`; that page is yours to write (see [Auth and admin](#auth-and-admin)).
 
 Same-origin links are handled by the client-side router. It fetches the next page as JSON and patches the DOM, with no full reload. Opt out with `a(..., data_reload=True)`.
 
@@ -190,8 +190,8 @@ def rename(request, todo: Todo, title: str) -> dict:   # `todo: Todo` loads the 
 ```
 
 - **In a component**, call it with `await rename(todo_id, "New title")`. Keyword arguments work too.
-- **Arguments are validated** against the type hints before your code runs. Supported hints: `str`, `int`, `float`, `bool`, `list[...]`, `dict[...]`, `Optional`, `Literal`, dataclasses and models.
-- **Return values** can be JSON-able data or UI elements (rendered in the browser), or a `redirect(url)` that navigates.
+- **Arguments are validated** against the type hints before your code runs. Supported hints: `str`, `int`, `float`, `bool`, `list[...]`, `tuple[...]`, `set[...]`, `dict[...]`, `Optional` and unions, `Literal`, dataclasses, models, a `forms.Schema`, and (sent as strings) `date`, `datetime`, `time`, `UUID`, `Decimal`, `bytes` (base64) and `Enum`. Any other annotation is refused when the function is defined (`J405`); use `Any` to take any JSON.
+- **Return values** can be JSON-able data or UI elements (rendered in the browser), or a `redirect(url)` that navigates: a path on this site or an `http(s)` URL (a `javascript:` target is refused).
 - **Failures** raise `ServerError` in the browser, with `.status`, `.type` and field `.errors`.
 - **Options:** `@server(login_required=True)`, `@server(admin_required=True)`, `@server(refresh=True)` to re-run the page loader after each call, and `@server(rate_limit="5/minute")` to cap one caller (429 over the limit).
 - **Security:** every call is CSRF-protected. Only functions you decorate are exposed.
@@ -236,7 +236,7 @@ def SignupForm():
 
 - **One definition.** The schema is data, inlined into the bundle; `forms.validate` is Python the compiler turns into JavaScript. Messages are rendered once, in Python, and patterns are rewritten to syntax both regex engines read the same way, or refused when the schema is defined.
 - **The server never trusts the browser.** A `@server` parameter annotated with a schema is validated again and arrives cleaned: typed, stripped, and holding only the fields the schema declares.
-- **From a model:** `forms.Schema.from_model(Invite)` reads `max_length`, `choices` and types from the table.
+- **From a model:** `forms.Schema.from_model(Invite)` reads `max_length`, `choices` and types from the table. Pick fields with `only=[...]` or `exclude=[...]`; `is_admin`, `is_staff`, `is_superuser` and `password` are left out unless `only=` names them.
 - **Checked, not asserted:** a test runs every rule against a table of awkward values in CPython and in the compiled bundle under Node, and requires identical answers.
 
 ## Real-time
@@ -273,6 +273,11 @@ tab carries every channel the page asked for, and reconnects with backoff if it 
   broadcast reaches every connection. Across multiple worker processes, each worker only
   reaches its own connections — put a shared bus in front if you need that.
 - Each streaming connection holds a worker thread, so raise `--threads` for a chatty app.
+- A tab may listen to at most `MAX_CHANNELS` (20) channels, with names of at most
+  `MAX_CHANNEL_LENGTH` (200) characters (both in the `jongo.live` module). The one stream
+  counts every `live()` on the page together, so give a list one channel and put the row id
+  in the message, rather than a channel per row; past the limit the stream is refused (403,
+  `J210`).
 
 ## Styles
 
@@ -355,7 +360,8 @@ from jongo.auth import User, authenticate, login, logout
 app.admin()                                  # generated admin at /admin
 ```
 
-- **Users:** `User.create_user(...)`, then `authenticate`, `login(request, user)` and `logout(request)`. `request.user` is available in pages, routes and server functions.
+- **Users:** `User.create_user(username, password, **fields)` for sign-up (it hashes the password; never `User.create(password=...)`, which `save()` refuses with `J304`), then `authenticate(username, password, request)`, `login(request, user)` and `logout(request)`. `request.user` is available in pages, routes and server functions.
+- **The sign-in page is yours.** `login_required` redirects to `login_url` (`/login` by default) with `?next=`; define that page, and after signing in redirect to `next` only if `is_local_url(next)` (`from jongo import is_local_url`), so a link can't send your users to another site. [Pattern 02](examples/patterns/02_auth.py) is a complete one.
 - **Passwords** use PBKDF2-SHA256. Changing a password signs out the user's other sessions.
 - **Password guessing is throttled** with no configuration: after 10 wrong passwords for a username in 5 minutes, `authenticate()` stops checking and answers 429.
 - **Sign-ins are revocable.** Each `login()` is a row on the server: `auth.sessions(user)` lists them, `auth.revoke_session(id, user=user)` signs one browser out, `auth.revoke_sessions(user)` signs out everywhere, and `logout()` kills the cookie on the server, not just in the browser. `jongo sessions` does the same from the command line.
@@ -364,19 +370,45 @@ app.admin()                                  # generated admin at /admin
 ## Sessions, CSRF, security
 
 - **Sessions** are HMAC-signed cookies: `request.session["cart"] = [...]`. Set `JONGO_SECRET_KEY` in production. In dev, a key is generated into `.jongo/secret`.
-- **Rate limits:** `rate_limit="5/minute"` on `@server`, `@app.page` or `@app.route` caps one caller (the signed-in user, else the address); `ratelimit.check(request, "3/hour", "reset", key=email)` for your own key. Counters are per process.
+- **Rate limits:** `rate_limit="5/minute"` on `@server`, `@app.page` or `@app.route` caps one caller: every request counts against the client address and, when someone is signed in, against that user too, and either being over refuses it. `ratelimit.check(request, "3/hour", "reset", key=email)` for your own key. Counters are per process.
 - **Channel guards fail closed:** a guard must return `True` to allow a subscription; returning nothing refuses it.
 - **CSRF:** unsafe requests need a token. Browser code sends it automatically. Classic HTML forms need `input_(type="hidden", name="csrf_token", value=request.csrf_token)`. Cross-origin `Origin` headers are rejected.
+- **Host header:** `jongo dev` answers requests addressed to `localhost` or an IP address and refuses other host names (400, `J214`), which stops DNS rebinding; `Jongo(allowed_hosts=["myapp.example.com"])` lists more names (`".example.com"` takes subdomains too), and turns the check on in production.
+- **Framing:** pages carry `X-Frame-Options: SAMEORIGIN` (and `frame-ancestors 'self'` when there's no CSP); `Jongo(frame_options="DENY")` is stricter and `frame_options=None` opts out.
+- **Request limits:** bodies up to `Request.max_body_size` (16 MB) and forms up to `Request.max_form_fields` / `Request.max_form_parts` (1000 each); more is a 413 (`J212`) before anything is parsed.
+- **Redirects:** `is_local_url(url)` is true only for a path on this site; check user-supplied redirect targets with it.
 - **Escaping:** text is always HTML-escaped. `raw()` is the explicit escape hatch.
 - **Data sent to the browser:** props are converted to JSON. `User.to_dict()` never includes password hashes.
 
 ## Testing
 
+`TestClient` uses the database the app is configured with, so the `app` fixture gives every
+test a fresh in-memory one instead of `db.sqlite3`. Put it in `conftest.py` next to `app.py`
+(`jongo new` writes the same fixture into `tests/conftest.py`):
+
+```python
+import pytest
+from jongo import db
+
+import app as todo_module
+
+
+@pytest.fixture
+def app():
+    db.configure(":memory:")    # a new, empty database for each test
+    db.migrate()                # with every model's table
+    yield todo_module.app
+    db.close_connections()
+```
+
+Then, in a test file that does `from app import add_todo`:
+
 ```python
 def test_add(app):
     client = app.test_client()
-    assert client.get("/").status == 200
+    assert client.get("/").status == 200           # the status code, as an int
     todo = client.rpc(add_todo, "Write tests")     # full HTTP round trip, CSRF included
+    assert todo["title"] == "Write tests"          # a refused call raises jongo.ServerError
     assert client.navigate("/")["title"] == "Todos"
 ```
 
@@ -456,6 +488,8 @@ surprises in a browser. From Python: `jongo.describe(app)`, `jongo.context(app)`
 | `jongo mcp [--list] [--read-only] [--user NAME]` | serve the app to a coding agent over MCP (stdio) |
 | `jongo sessions [--user NAME] [--revoke ID] [--revoke-user NAME]` | list or revoke sign-ins |
 
+With `--json`, a command prints JSON even when it fails: `{"ok": false, "error": {"code", "message", "hint", "file", "line"}}`, exit 1.
+
 ## Deployment
 
 `app` is a standard WSGI application:
@@ -501,7 +535,8 @@ Version 0.6 (see `CHANGELOG.md`). Known limits:
 - No classes in browser code.
 - Components re-render their subtree without memoisation.
 - `x__ne=v` / `.exclude(field=v)` also match rows where the column is `NULL` (matching Python's `None != v`, not SQL's three-valued logic).
-- Browser (post-hydration) code inherits JavaScript's value model, so a few things differ from CPython (the server is always correct): integers past 2⁵³ lose precision and `str(2.0)` shows `"2"` (one number type — format explicitly, e.g. `f"{x:.2f}"`); a dict keyed by ints iterates string keys; `isinstance(5, float)` is true. Do exact numeric/big-integer work in a `@server` function.
+- Browser (post-hydration) code inherits JavaScript's value model, so a few things differ from CPython (the server is always correct): integers past 2⁵³ lose precision and `str(2.0)` shows `"2"` (one number type — format explicitly, e.g. `f"{x:.2f}"`); a dict keyed by ints iterates string keys, and integer-like keys iterate in ascending order rather than insertion order; `isinstance(5, float)` is true; generator expressions are evaluated eagerly, so `any()`/`all()` don't stop early. Do exact numeric/big-integer work in a `@server` function.
+- The first argument to `Jongo()` should be `__name__` (or pass `root=`): the database file, `.jongo/secret` and `static/` are found next to that module.
 
 Bug reports and ideas are welcome.
 

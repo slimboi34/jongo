@@ -70,10 +70,13 @@ def environment_checks(port: int | None = None) -> list[dict]:
 
 
 def _port_check(port: int) -> dict:
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+        return check_result("port", "fail", f"{port!r} isn't a port number (it must be a whole number from 0 to 65535)",
+                            "pass a port such as --port 8000", code="J505")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         try:
             sock.bind(("127.0.0.1", port))
-        except OSError:
+        except (OSError, OverflowError):
             return check_result("port", "warn", f"port {port} is already in use (fine if it's this app running)",
                                 f"pick another with --port {port + 1}", code="J505")
     return check_result("port", "ok", f"port {port} is free")
