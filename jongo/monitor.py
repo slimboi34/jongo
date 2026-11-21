@@ -30,12 +30,26 @@ from .errors import CATALOGUE, app_location, classify, short_traceback
 __all__ = ["Monitor", "status"]
 
 _CREDENTIALS = re.compile(r"(://[^:/@\s]*:)[^@\s]*@")
+_CUT_CREDENTIAL = re.compile(r"(://[^:/@\s]*:)[^@\s]*$")  # one whose "@" fell past the cut
 _MAX_MESSAGE = 300
 _MAX_PATH = 200
 
 
 def redact(text: str, limit: int = _MAX_MESSAGE) -> str:
+    """``text`` with ``scheme://user:password@`` passwords masked, cut to ``limit`` characters.
+
+    The text is cut *before* the pattern runs: on a long message made of many ``://`` and
+    no ``@`` the substitution is quadratic, and error messages can carry request data (one
+    request could otherwise cost seconds of CPU). A credential the cut runs through is
+    masked to the end, so no part of its password shows.
+    """
+    window = max(limit, 1) * 4  # enough that a credential near the shown part is seen whole
+    cut = len(text) > window
+    if cut:
+        text = text[:window]
     text = _CREDENTIALS.sub(r"\1***@", text)
+    if cut:
+        text = _CUT_CREDENTIAL.sub(r"\1***", text)
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 

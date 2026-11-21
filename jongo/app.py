@@ -1,6 +1,7 @@
 """The Jongo application: routing, pages, server functions, sessions and the WSGI entry point."""
 from __future__ import annotations
 
+import collections.abc
 import hashlib
 import hmac
 import html as _html
@@ -9,11 +10,13 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import sys
 import threading
 import time
 import traceback
+import types
 import typing
 import urllib.parse
 from pathlib import Path
@@ -24,11 +27,14 @@ from . import log as jlog
 from .errors import CompileError, HTTPError, NotFound, app_location, classify, hint_for
 from .http import (
     CSRF_COOKIE,
+    IN_PROCESS_HOST,
     SESSION_COOKIE,
     Request,
     Response,
     Session,
     Signer,
+    _hostname,
+    host_allowed,
     json_response,
     redirect,
 )
@@ -65,8 +71,111 @@ _RPC_HINTS = {
             "\"kwargs\": {...}}; browser code does this for you with await fn(...).",
 }
 
+_FRAME_ANCESTORS = {"SAMEORIGIN": "frame-ancestors 'self'", "DENY": "frame-ancestors 'none'"}
+#: A scheme name as browsers parse one (after dropping control characters and spaces).
+_SCHEME = re.compile(r"[a-z][a-z0-9+.\-]*")
+
+
+def _redirect_allowed(location: str) -> bool:
+    """Whether a server call may send the browser to ``location``: a relative URL, or http(s).
+
+    The browser runtime navigates to whatever a server call's redirect names, so a
+    ``javascript:`` (or ``data:``, ``vbscript:``...) target would run script in the page.
+    """
+    text = str(location)
+    if vdom._is_dangerous_url(text):
+        return False
+    head, sep, _ = text.partition(":")
+    if not sep or any(c in head for c in "/?#"):
+        return True  # no scheme: a path, ?query, #fragment or //host
+    scheme = "".join(c for c in head if c > " ").lower()  # browsers ignore controls and spaces here
+    if not _SCHEME.fullmatch(scheme):
+        return True  # not a scheme ("1x:y"), so browsers read it as a relative path
+    return scheme in ("http", "https")
+
+
+_QUERY_TRUE = frozenset(("true", "1", "on", "yes"))
+_QUERY_FALSE = frozenset(("false", "0", "off", "no"))
+_SEQUENCES = (list, tuple, set, frozenset, collections.abc.Sequence, collections.abc.Iterable)
+
+
+def _query_bool(text):
+    """``"true"``/``"1"``/``"on"``/``"yes"`` -> True, the opposites -> False, anything else -> None."""
+    word = text.strip().lower() if isinstance(text, str) else None
+    return True if word in _QUERY_TRUE else False if word in _QUERY_FALSE else None
+
+
+def _hint_options(hint) -> list:
+    """The non-None types a hint allows: ``Optional[bool]`` -> ``[bool]``."""
+    if typing.get_origin(hint) in (typing.Union, getattr(types, "UnionType", typing.Union)):
+        return [a for a in typing.get_args(hint) if a is not type(None)]
+    return [hint]
+
+
+def _query_argument(query, name: str, hint):
+    """A page or route argument from the query string, checked against its annotation.
+
+    ``coerce()`` checks decoded JSON, where a bool is a bool and a list is a list; a query
+    string holds only text. So ``bool`` accepts true/1/on/yes and false/0/off/no (any case),
+    and a list annotation collects the repeated key (``?id=1&id=2``), each item checked.
+    """
+    options = _hint_options(hint)
+    sequence = next((o for o in options if (typing.get_origin(o) or o) in _SEQUENCES and o is not str), None)
+    if sequence is not None:
+        items = query.getlist(name)
+        inner = typing.get_args(sequence)
+        if any(bool in _hint_options(t) for t in inner):  # list[bool]: convert the words first
+            items = [b if (b := _query_bool(v)) is not None else v for v in items]
+        return coerce(items, hint, name)
+    raw = query[name]
+    try:
+        return coerce(raw, hint, name)
+    except HTTPError as exc:
+        word = _query_bool(raw) if exc.code == "J403" and bool in options else None
+        if word is None:
+            raise
+        return coerce(word, hint, name)
+
+
+class _LiveWatch(typing.NamedTuple):
+    ids: dict = {}  # login_session= and user= for hub.subscribe(); never mutated
+    alive: typing.Callable[[], bool] | None = None
+
+
+def _caller_root(name: str | None) -> Path:
+    """The directory of the file that called ``Jongo(...)``, for a name that isn't a loaded module."""
+    try:
+        caller = sys._getframe(2).f_globals.get("__file__")  # 0: here, 1: Jongo.__init__, 2: its caller
+    except ValueError:
+        caller = None
+    if caller and not str(caller).startswith("<"):
+        return Path(caller).resolve().parent
+    log.warning("Jongo(%r) can't tell where the app's files are, so it uses the current directory (%s) for "
+                "the database, the secret key and static/. Pass Jongo(__name__), or root=...", name, Path.cwd())
+    return Path.cwd()
+
 
 class Jongo:
+    """A Jongo application.
+
+    Parameters (the less obvious ones):
+        name: pass ``__name__``. It locates the app's directory (``root``), where a relative
+            ``database`` path, ``.jongo/secret`` and ``static/`` live. If it isn't the name of
+            an imported module, the directory of the file that created the app is used.
+        allowed_hosts: the ``Host`` names the app answers to, e.g. ``["example.com",
+            ".example.com"]`` (a leading dot or ``*.`` also allows subdomains; ``"*"`` allows any).
+            Under ``jongo dev`` the app always answers ``localhost``, ``*.localhost`` and IP
+            addresses, and refuses other names with a 400 (``J214``) unless they are listed
+            here, so a web page can't reach the dev server by DNS rebinding. In production the
+            check applies only when this is set.
+        frame_options: ``"SAMEORIGIN"`` (the default) lets only the app's own pages frame it;
+            ``"DENY"`` forbids framing; ``None`` sends no framing headers (for an app meant to
+            be embedded elsewhere). Sent as ``X-Frame-Options`` and, unless the response
+            already has a ``Content-Security-Policy``, as ``frame-ancestors``.
+        trust_proxy: trust ``X-Forwarded-Proto``/``X-Forwarded-For`` (only behind a proxy you
+            control).
+    """
+
     def __init__(
         self,
         name: str | None = None,
@@ -82,6 +191,8 @@ class Jongo:
         session_max_age: int = 14 * 24 * 3600,
         static_url: str = "/static",
         trust_proxy: bool = False,
+        allowed_hosts=None,
+        frame_options: str | None = "SAMEORIGIN",
     ):
         self.name = name or "app"
         module = sys.modules.get(name) if name else None
@@ -90,7 +201,17 @@ class Jongo:
         elif module is not None and getattr(module, "__file__", None):
             self.root = Path(module.__file__).resolve().parent
         else:
-            self.root = Path.cwd()
+            self.root = _caller_root(name)
+        if frame_options is not None:
+            frame_options = str(frame_options).upper()
+            if frame_options not in _FRAME_ANCESTORS:
+                raise ValueError(f"frame_options must be 'SAMEORIGIN', 'DENY' or None, not {frame_options!r}")
+        #: Sent as X-Frame-Options (and CSP frame-ancestors) on every response; None sends neither.
+        self.frame_options = frame_options
+        if isinstance(allowed_hosts, str):
+            allowed_hosts = [allowed_hosts]
+        #: The Host names this app answers to beyond this machine's (see the class docstring), or None.
+        self.allowed_hosts = [str(h) for h in allowed_hosts] if allowed_hosts is not None else None
         self.title = title
         self.dev = dev if dev is not None else os.environ.get("JONGO_DEV") == "1"
         self.lang = lang
@@ -235,6 +356,7 @@ class Jongo:
         with jlog.request_scope() as rid:
             request.request_id = rid
             try:
+                self._check_host(request)
                 self._load_session(request)
                 response = None
                 for hook in self.before_request_hooks:
@@ -282,6 +404,24 @@ class Jongo:
                                       route=route.name if route is not None else None)
             return response
 
+    def _check_host(self, request: Request) -> None:
+        """Refuse a Host header that doesn't name this app (J214); see ``allowed_hosts``."""
+        host = request.headers.get("host")
+        if host is None or host == request.environ.get(IN_PROCESS_HOST):
+            return  # no Host to rebind (HTTP/1.0), or an in-process client's made-up name
+        if not self.dev and not self.allowed_hosts:
+            return
+        if host_allowed(host, self.allowed_hosts or (), dev=self.dev):
+            return
+        shown = host if len(host) <= 100 else host[:100] + "…"
+        if self.dev:
+            hint = ("under jongo dev the app answers localhost, *.localhost and IP addresses only, so a web page "
+                    f"can't reach it by DNS rebinding; to use this name, list it: Jongo(__name__, "
+                    f"allowed_hosts=[{_hostname(shown)!r}])")
+        else:
+            hint = "add the host to Jongo(allowed_hosts=[...]) if this app should answer it"
+        raise HTTPError(400, f"This app doesn't answer to the host {shown!r}", code="J214", hint=hint)
+
     def _dispatch(self, request: Request) -> Response:
         route, params = self.router.match(request.method, request.path)
         request.route = route
@@ -320,7 +460,7 @@ class Jongo:
             elif name in request.query:
                 raw = request.query[name]
                 try:
-                    kwargs[name] = coerce(raw, hints.get(name, typing.Any), name)
+                    kwargs[name] = _query_argument(request.query, name, hints.get(name, typing.Any))
                 except HTTPError as exc:
                     if exc.code != "J403":
                         raise
@@ -466,6 +606,14 @@ class Jongo:
         # Stop browsers from sniffing a response into a different (executable) type,
         # e.g. an uploaded .txt served from /static rendered as HTML.
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        if self.frame_options:
+            # Clickjacking: only the app's own pages may frame it. A header the response set
+            # itself (the admin's DENY, an app's own CSP) is kept.
+            present = {name.lower() for name in response.headers}
+            if "x-frame-options" not in present:
+                response.headers["X-Frame-Options"] = self.frame_options
+            if "content-security-policy" not in present:
+                response.headers["Content-Security-Policy"] = _FRAME_ANCESTORS[self.frame_options]
         if self._session_changed(request):
             if request.session:
                 value = self.signer.dumps(dict(request.session))
@@ -481,10 +629,34 @@ class Jongo:
                 CSRF_COOKIE, request.csrf_token, max_age=365 * 24 * 3600, httponly=False,
                 secure=request.scheme == "https",
             )
+        # A header value the server can't send would fail after the status line has gone out
+        # (a truncated response). Fail here instead, as a proper 500 that names the header.
+        response.wsgi_headers()
 
     def load_user(self, request: Request):
         auth = sys.modules.get("jongo.auth")
         return auth.get_user(request) if auth else None
+
+    def _live_watch(self, request: Request) -> "_LiveWatch":
+        """Who a live stream belongs to, and (when a user is signed in) a check that the
+        sign-in still holds. The stream re-runs the check as it goes and ends once the
+        session is revoked, has expired or the password changed (see ``live.SESSION_CHECK_SECONDS``)."""
+        if not request.session.get("_sid"):
+            return _LiveWatch()
+        try:
+            user = request.user  # usually loaded already, by the channel guard
+        except Exception:
+            log.warning("couldn't load the user for a live stream; it won't be ended on sign-out", exc_info=True)
+            return _LiveWatch()
+        if user is None:
+            return _LiveWatch()
+        uid = getattr(user, "pk", None)
+
+        def alive() -> bool:
+            current = self.load_user(request)  # the same lookup every request makes
+            return current is not None and getattr(current, "pk", None) == uid
+
+        return _LiveWatch({"login_session": getattr(request.login_session, "pk", None), "user": uid}, alive)
 
     # -- errors ------------------------------------------------------------------------------------
 
@@ -494,7 +666,9 @@ class Jongo:
             headers["Retry-After"] = str(exc.retry_after)
         route = getattr(request, "route", None)
         # also /_jongo/status/ and //_jongo/status; the other machine-facing endpoints answer in JSON too
-        is_status = route is not None and route.name in ("_jongo_status", "_jongo_mcp", "_jongo_openapi")
+        # (the live stream's refusals included, so the browser runtime can read why it was refused)
+        is_status = route is not None and route.name in ("_jongo_status", "_jongo_mcp", "_jongo_openapi",
+                                                         "_jongo_live")
         if request.path.startswith("/_jongo/rpc/") or is_status:
             code, hint = classify(exc)
             if request.path.startswith("/_jongo/rpc/") and code in _RPC_HINTS and not getattr(exc, "hint", None):
@@ -614,6 +788,14 @@ class Jongo:
             if isinstance(result, Response):
                 location = result.headers.get("Location")
                 if location:
+                    if not _redirect_allowed(location):
+                        shown = location if len(location) <= 60 else location[:60] + "…"
+                        raise HTTPError(
+                            500, f"server function {function_id} returned redirect({shown!r}); a server call "
+                                 "may only redirect to a relative URL or an http(s) one", code="J408",
+                            hint="the browser would run a javascript: (or data:) target as script; check a "
+                                 "target taken from the request with is_local_url() before redirecting to it",
+                        )
                     response = json_response({"redirect": location})
                     response.cookies.extend(result.cookies)
                     return response
@@ -625,20 +807,27 @@ class Jongo:
             """Two streams on one route: dev live-reload, and declared channels."""
             channels = live_module.parse_channels(request.query.get("channels"))
             if channels:
-                allowed = live_module.authorize(channels, app.channels, request)
-                subscriber = live_module.hub.subscribe(allowed)
+                allowed = live_module.authorize(channels, app.channels, request)  # eager: a refusal is a 403
+                headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+                if request.method != "GET":  # HEAD: the headers a GET would get, and nothing to subscribe
+                    return Response(b"", headers=headers, content_type="text/event-stream")
+                live_module.hub.check_capacity()
+                watch = app._live_watch(request)
 
                 def stream():
+                    # Subscribed only once the server starts sending, so a response that is
+                    # never sent (or sent without a body) can't leave a subscriber behind.
                     try:
-                        yield from live_module.event_stream(subscriber)
+                        subscriber = live_module.hub.subscribe(allowed, **watch.ids)
+                    except live_module.HubFull:
+                        yield f"retry: {live_module.FULL_RETRY_MS}\n\n"
+                        return
+                    try:
+                        yield from live_module.event_stream(subscriber, alive=watch.alive)
                     finally:  # the WSGI server closes the iterator when the client goes
                         live_module.hub.unsubscribe(subscriber)
 
-                return Response(
-                    stream(),
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                    content_type="text/event-stream",
-                )
+                return Response(stream(), headers=headers, content_type="text/event-stream")
 
             if not app.dev:
                 raise NotFound()
@@ -653,16 +842,22 @@ class Jongo:
                             content_type="text/event-stream")
 
         def static(request, path: str):
-            base = (app.root / "static").resolve()
-            target = (base / path).resolve()
-            if not target.is_relative_to(base) or not target.is_file():
+            if "\x00" in path:
                 raise NotFound()
-            stat = target.stat()
-            etag = f'"{int(stat.st_mtime)}-{stat.st_size}"'
-            if request.headers.get("if-none-match") == etag:
-                return Response(b"", 304, {"ETag": etag}, content_type=None)
+            try:  # an over-long name (ENAMETOOLONG) or an unreadable file is "not found", not a 500
+                base = (app.root / "static").resolve()
+                target = (base / path).resolve()
+                if not target.is_relative_to(base) or not target.is_file():
+                    raise NotFound()
+                stat = target.stat()
+                etag = f'"{int(stat.st_mtime)}-{stat.st_size}"'
+                if request.headers.get("if-none-match") == etag:
+                    return Response(b"", 304, {"ETag": etag}, content_type=None)
+                data = target.read_bytes()
+            except (ValueError, OSError):
+                raise NotFound() from None
             content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-            return Response(target.read_bytes(), 200, {"ETag": etag, "Cache-Control": "public, max-age=3600"}, content_type)
+            return Response(data, 200, {"ETag": etag, "Cache-Control": "public, max-age=3600"}, content_type)
 
         self.router.add(Route("/_jongo/app.js", app_js, name="_jongo_js", kind="internal"))
         self.router.add(Route("/_jongo/app.css", app_css, name="_jongo_css", kind="internal"))

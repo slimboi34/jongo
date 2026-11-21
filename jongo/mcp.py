@@ -54,6 +54,7 @@ import urllib.parse
 from typing import Any
 
 from .errors import HTTPError, JongoError, app_location, classify, hint_for
+from .http import _LOCAL_NAMES, IN_PROCESS_HOST, _hostname
 
 __all__ = ["McpServer", "serve_stdio", "PROTOCOL_VERSIONS"]
 
@@ -70,15 +71,6 @@ _NO_ARGS = {"type": "object", "properties": {}, "additionalProperties": False}
 
 
 _LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
-_LOCAL_NAMES = ("127.0.0.1", "localhost", "::1")
-
-
-def _hostname(host: str) -> str:
-    """``localhost:8000`` -> ``localhost``; ``[::1]:8000`` -> ``::1``."""
-    host = (host or "").strip().lower()
-    if host.startswith("["):
-        return host[1:].split("]", 1)[0]
-    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
 
 
 class _RpcError(Exception):
@@ -98,6 +90,7 @@ def _local_environ(method: str, path: str) -> dict:
         "SERVER_NAME": "mcp.local", "SERVER_PORT": "80", "SERVER_PROTOCOL": "HTTP/1.1", "HTTP_HOST": "mcp.local",
         "REMOTE_ADDR": "127.0.0.1", "wsgi.input": io.BytesIO(b""), "wsgi.url_scheme": "http",
         "wsgi.errors": io.StringIO(), "CONTENT_LENGTH": "0", "CONTENT_TYPE": "",
+        IN_PROCESS_HOST: "mcp.local",  # made up in-process: the app's Host check lets it through
     }
 
 
@@ -409,8 +402,9 @@ class McpServer:
             return Response(b"", 405, {"Allow": "POST", **headers}, content_type=None)
         try:
             message = json.loads(request.body or b"null")
-        except ValueError:
-            return json_response(_error(None, _PARSE_ERROR, "the body isn't valid JSON", "J422"), 400, headers)
+        except (ValueError, RecursionError):  # RecursionError: nested deeper than json's C decoder goes
+            return json_response(_error(None, _PARSE_ERROR, "the body isn't valid JSON (or is nested too deeply)",
+                                        "J422"), 400, headers)
         if isinstance(message, list):
             return json_response(_error(None, _INVALID_REQUEST, "send one JSON-RPC message per request "
                                                                  "(batches aren't supported)", "J422"), 400, headers)
@@ -519,11 +513,17 @@ def _t_get(server, args, request):
     inner = Request(_local_environ("GET", path), server.app)
     inner.user = server._request(request).user
     response = server.app.handle(inner)
-    body = b"".join(c if isinstance(c, bytes) else c.encode() for c in response.iter_body()
-                    ) if not _is_stream(response) else b""
+    streaming = _is_stream(response)
+    if streaming:  # never read (an event stream doesn't end): close it so nothing it holds lingers
+        close = getattr(response.body, "close", None)
+        if close is not None:
+            close()
+    body = b"" if streaming else b"".join(c if isinstance(c, bytes) else c.encode() for c in response.iter_body())
     text = body.decode("utf-8", "replace")
     out = {"status": response.status, "content_type": response.headers.get("Content-Type"),
            "length": len(text), "truncated": len(text) > MAX_BODY, "body": text[:MAX_BODY]}
+    if streaming:
+        out["streaming"] = True
     if response.headers.get("Location"):
         out["location"] = response.headers["Location"]
     code = getattr(inner, "error_code", None)
@@ -610,6 +610,22 @@ def _read_resource(server, uri: str) -> str:
 # ---------------------------------------------------------------------------------- stdio --
 
 
+def _stdio_reply(server: McpServer, line: str) -> dict | None:
+    """The reply to one line of stdio input. Nothing a client sends may end the read loop."""
+    try:
+        message = json.loads(line)
+    except (ValueError, RecursionError):  # RecursionError: nested deeper than json's C decoder goes
+        return _error(None, _PARSE_ERROR, "the line isn't valid JSON (or is nested too deeply)", "J422")
+    if isinstance(message, list):
+        return _error(None, _INVALID_REQUEST, "send one JSON-RPC message per line (batches aren't supported)",
+                      "J422")
+    try:
+        return server.handle(message)
+    except Exception as exc:  # handle() answers errors itself; this is the last line of defence
+        id_ = message.get("id") if isinstance(message, dict) else None
+        return _error(id_, _INTERNAL, f"{type(exc).__name__} while handling the message")
+
+
 def serve_stdio(server: McpServer, stdin=None, stdout=None) -> None:
     """Speak MCP over stdin/stdout until the input closes: one JSON message per line.
 
@@ -634,18 +650,13 @@ def serve_stdio(server: McpServer, stdin=None, stdout=None) -> None:
             line = line.strip()
             if not line:
                 continue
-            try:
-                message = json.loads(line)
-            except ValueError:
-                response = _error(None, _PARSE_ERROR, "the line isn't valid JSON", "J422")
-            else:
-                if isinstance(message, list):
-                    response = _error(None, _INVALID_REQUEST, "send one JSON-RPC message per line "
-                                                              "(batches aren't supported)", "J422")
-                else:
-                    response = server.handle(message)
+            response = _stdio_reply(server, line)
             if response is not None:
-                out.write(json.dumps(response, separators=(",", ":"), default=str) + "\n")
+                try:
+                    text = json.dumps(response, separators=(",", ":"), default=str)
+                except Exception as exc:  # e.g. a result (or an echoed id) nested too deeply to encode
+                    text = json.dumps(_error(None, _INTERNAL, f"the reply couldn't be encoded: {type(exc).__name__}"))
+                out.write(text + "\n")
                 out.flush()
     finally:
         if redirect:

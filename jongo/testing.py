@@ -13,7 +13,44 @@ import secrets
 import urllib.parse
 
 from .errors import ServerError
-from .http import CSRF_COOKIE, SESSION_COOKIE
+from .http import CSRF_COOKIE, IN_PROCESS_HOST, SESSION_COOKIE
+
+
+def _check_headers(status: str, headers: list) -> None:
+    """Fail the way a real server would on a header it can't send: only Latin-1 goes on the wire.
+
+    wsgiref (``jongo dev``/``jongo run``) raises after sending the status line, so the browser
+    gets a truncated response; catching it here makes a test fail instead of passing.
+    """
+    for name, value in [("status", status), *headers]:
+        try:
+            str(name).encode("latin-1")
+            str(value).encode("latin-1")
+        except UnicodeEncodeError:
+            raise ValueError(f"response header {name}: {value!r} isn't Latin-1, so a real server couldn't send "
+                             "it; percent-encode it first") from None
+
+
+class _Started:
+    """A streaming response a server has started: the first chunk is already read, and is
+    replayed first. ``close()`` disconnects, as a browser leaving the page does."""
+
+    def __init__(self, chunks, first):
+        self._chunks = chunks
+        self._pending = [first] if first is not None else []
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._pending:
+            return self._pending.pop()
+        return next(self._chunks)
+
+    def close(self):
+        close = getattr(self._chunks, "close", None)
+        if close is not None:
+            close()
 
 
 class TestResponse:
@@ -72,6 +109,7 @@ class TestClient:
             "SERVER_PORT": "80",
             "SERVER_PROTOCOL": "HTTP/1.1",
             "HTTP_HOST": "testserver",
+            IN_PROCESS_HOST: "testserver",  # lets the made-up name past the app's Host check (J214)
             "REMOTE_ADDR": "127.0.0.1",
             "wsgi.input": io.BytesIO(body),
             "wsgi.url_scheme": "http",
@@ -91,25 +129,31 @@ class TestClient:
 
         Returns ``(response, chunks)``; ``response.body`` is empty and ``chunks`` is the
         live iterator. Close it (``chunks.close()``) to disconnect, as a browser would.
+
+        Like a real server, this starts the response: the body runs up to its first chunk
+        (for a live stream, that is when it subscribes). ``chunks`` still yields that chunk
+        first.
         """
         environ = self._environ("GET", path, headers=headers)
         captured = {}
 
         def start_response(status, response_headers, exc_info=None):
+            _check_headers(status, response_headers)
             captured["status"], captured["headers"] = status, response_headers
 
         chunks = iter(self.app(environ, start_response))
-        first = None
-        if "status" not in captured:  # a WSGI app may not call start_response until the first chunk
-            first = next(chunks, None)
-        response = TestResponse(captured["status"], captured["headers"], first or b"")
-        return response, chunks
+        deferred = "status" not in captured  # a WSGI app may not call start_response until the first chunk
+        first = next(chunks, None)
+        if deferred:
+            return TestResponse(captured["status"], captured["headers"], first or b""), chunks
+        return TestResponse(captured["status"], captured["headers"], b""), _Started(chunks, first)
 
     def request(self, method, path, *, data=None, json=None, headers=None, follow_redirects=False) -> TestResponse:
         environ = self._environ(method, path, data=data, json=json, headers=headers)
         captured = {}
 
         def start_response(status, response_headers, exc_info=None):
+            _check_headers(status, response_headers)
             captured["status"], captured["headers"] = status, response_headers
 
         chunks = self.app(environ, start_response)
