@@ -18,6 +18,11 @@ Two protections are on without configuration:
 * **Password guessing is throttled.** After :data:`LOGIN_ATTEMPTS` wrong passwords for one
   username inside :data:`LOGIN_WINDOW` seconds, ``authenticate()`` raises a 429
   (:class:`jongo.ratelimit.TooManyRequests`, code ``J213``) instead of checking another one.
+  The count is kept per exact username (the lookup is case-sensitive too) on a limiter of
+  its own, :data:`limiter`.
+* **Passwords are stored hashed.** Set them with :meth:`User.create_user` or
+  :meth:`User.set_password`; saving a ``User`` whose ``password`` isn't a hash raises
+  ``ValidationError`` rather than writing the raw password to the database.
 * **Sign-ins can be revoked from the server.** Every ``login()`` is a row in
   ``jongo_sessions``; ``logout()`` deletes it, and so can you: :func:`sessions` lists a
   user's sign-ins, :func:`revoke_session` ends one and :func:`revoke_sessions` ends them
@@ -29,17 +34,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 
 from . import db
-from .ratelimit import RateLimit, TooManyRequests, limiter
+from .ratelimit import Limiter, RateLimit, TooManyRequests
 
 __all__ = [
     "User", "LoginSession", "authenticate", "login", "logout", "get_user", "sessions", "revoke_session",
     "revoke_sessions", "hash_password", "verify_password", "session_data_for",
-    "LOGIN_ATTEMPTS", "LOGIN_WINDOW", "LOGIN_ATTEMPTS_PER_ADDRESS",
+    "LOGIN_ATTEMPTS", "LOGIN_WINDOW", "LOGIN_ATTEMPTS_PER_ADDRESS", "limiter",
 ]
 
 ALGORITHM = "pbkdf2_sha256"
@@ -53,6 +59,11 @@ LOGIN_ATTEMPTS: int | None = 10
 LOGIN_ATTEMPTS_PER_ADDRESS: int | None = 50
 #: The length of the throttle window, in seconds.
 LOGIN_WINDOW: int = 300
+
+#: The limiter that counts wrong passwords. It is separate from :data:`jongo.ratelimit.limiter`
+#: (``rate_limit=``), so a flood of other rate-limited calls can't crowd the sign-in counters
+#: out of memory. ``auth.limiter.reset()`` forgets every count (useful between tests).
+limiter = Limiter()
 
 #: How stale ``last_seen`` may get before a request refreshes it (seconds). Keeps an
 #: authenticated request to reads only, most of the time.
@@ -90,6 +101,23 @@ def _dummy() -> str:
     return _dummy_hash
 
 
+#: ``<algorithm>$<iterations>$<salt>$<digest>``: the shape of a stored hash (any algorithm name,
+#: so hashes imported from elsewhere in the same layout can be stored and upgraded later).
+_HASH_SHAPE = re.compile(r"[A-Za-z0-9_]+\$[0-9]{1,10}\$[^$]+\$[^$]+")
+
+
+def _is_hash(value) -> bool:
+    return isinstance(value, str) and _HASH_SHAPE.fullmatch(value) is not None
+
+
+def _checkable(encoded) -> bool:
+    """True when ``verify_password`` would really hash against ``encoded``."""
+    if not _is_hash(encoded):
+        return False
+    algorithm, iterations, _ = encoded.split("$", 2)
+    return algorithm == ALGORITHM and int(iterations) >= 1
+
+
 class User(db.Model):
     username = db.Text(max_length=150, unique=True)
     email = db.Text(max_length=254, blank=True, default="")
@@ -107,7 +135,20 @@ class User(db.Model):
         self.password = hash_password(raw_password)
 
     def check_password(self, raw_password: str) -> bool:
-        return bool(self.password) and verify_password(raw_password, self.password)
+        if not _checkable(self.password):
+            # No password set (or not one this module can check): still do one hash's work,
+            # so the reply takes as long as a wrong password and timing reveals nothing.
+            verify_password(raw_password, _dummy())
+            return False
+        return verify_password(raw_password, self.password)
+
+    def clean(self) -> None:
+        # Model.create(password=...) and assign-then-save go through here; without this check
+        # they would write the raw password to the database, where no login can match it.
+        if self.password and not _is_hash(self.password):
+            raise db.ValidationError({
+                "password": "User.password must be a hash: use User.create_user(...) or user.set_password(...)",
+            })
 
     def to_dict(self) -> dict:
         data = super().to_dict()
@@ -128,7 +169,10 @@ class User(db.Model):
 def _throttle_keys(username: str, request) -> list[tuple[str, RateLimit]]:
     keys = []
     if LOGIN_ATTEMPTS:
-        keys.append((f"login|user:{str(username).strip().lower()[:150]}", RateLimit(LOGIN_ATTEMPTS, LOGIN_WINDOW)))
+        # Exactly the name the account is looked up by (that lookup is case-sensitive). A
+        # normalised key would let a look-alike account ("Ann" for "ann") clear the victim's
+        # count with its own correct password.
+        keys.append((f"login|user:{str(username)[:150]}", RateLimit(LOGIN_ATTEMPTS, LOGIN_WINDOW)))
     if LOGIN_ATTEMPTS_PER_ADDRESS and request is not None:
         address = getattr(request, "client_ip", None) or getattr(request, "remote_addr", "") or "unknown"
         keys.append((f"login|ip:{address}", RateLimit(LOGIN_ATTEMPTS_PER_ADDRESS, LOGIN_WINDOW)))
@@ -141,7 +185,7 @@ def authenticate(username: str, password: str, request=None) -> User | None:
     Wrong passwords are counted per username (and per client address when ``request`` is
     passed). Past :data:`LOGIN_ATTEMPTS` failures in :data:`LOGIN_WINDOW` seconds the
     password is no longer checked at all: the call raises, so guessing gains nothing and
-    costs the server no hashing. A correct password clears the username's count.
+    costs the server no hashing. A correct password clears that exact username's count.
 
     Parameters:
         username: the account name.
@@ -189,8 +233,8 @@ def authenticate(username: str, password: str, request=None) -> User | None:
         return None
     for key in counted:  # a correct password was never a guess
         limiter.refund(key)
-    if counted and LOGIN_ATTEMPTS:
-        limiter.reset(counted[0])
+    if LOGIN_ATTEMPTS:  # and it clears this exact username's count, nobody else's
+        limiter.reset(keys[0][0])
     return user
 
 
@@ -248,22 +292,32 @@ def _ensure_table() -> None:
     """
     global _table_ready
     from .db import connection
-    from .db.migrate import _apply, live_tables, plan_migrations
+    from .db.migrate import MigrationError, _apply, live_tables, plan_migrations
 
     marker = (connection.database_path(), connection._generation)
     if _table_ready == marker:
         return
-    with _table_lock:
+    table, users = LoginSession._meta.table.lower(), User._meta.table.lower()
+    with _table_lock:  # one thread per process; other processes are handled below
         if _table_ready == marker:
             return
         with connection.locked() as conn:
             tables = live_tables(conn)
-            if LoginSession._meta.table not in tables and User._meta.table in tables:
-                operations = [op for op in plan_migrations([User, LoginSession])
-                              if op.table == LoginSession._meta.table and not op.destructive]
-                with connection.transaction():
-                    for op in operations:
-                        _apply(conn, op)
+        if table not in tables and users in tables:
+            try:
+                # Decide and create inside one write transaction (BEGIN IMMEDIATE on SQLite), so
+                # two processes signing in at once after an upgrade can't both see "missing".
+                with connection.transaction() as conn:
+                    tables = live_tables(conn)
+                    if table not in tables and users in tables:
+                        for op in plan_migrations([User, LoginSession]):
+                            if op.table.lower() == table and not op.destructive:
+                                _apply(conn, op)
+            except MigrationError:
+                # Another process created it first (on PostgreSQL BEGIN takes no lock): fine.
+                with connection.locked() as conn:
+                    if table not in live_tables(conn):
+                        raise
         _table_ready = (connection.database_path(), connection._generation)
 
 
@@ -303,8 +357,9 @@ def session_data_for(user: User, request=None) -> dict:
 def login(request, user: User) -> None:
     """Sign ``user`` in on this request's session.
 
-    Clears whatever the session held (so a pre-login session id can't be reused), records
-    the sign-in in ``jongo_sessions`` and sets ``request.user``.
+    Clears whatever the session held (so a pre-login session id can't be reused), issues a
+    new CSRF token (so one minted, or planted, before sign-in stops working), records the
+    sign-in in ``jongo_sessions`` and sets ``request.user``.
 
     Example::
 
@@ -314,10 +369,19 @@ def login(request, user: User) -> None:
     """
     _end_current(request)
     request.session.clear()
+    _rotate_csrf(request)
     request.session.update(session_data_for(user, request))
     user.last_login = datetime.now(timezone.utc)
-    user.save()
+    # Write just this column: a full save() would also rewrite (and re-validate) every other
+    # field, failing for a row stored by an older version with a raw password.
+    User.filter(id=user.id).update(last_login=user.last_login)
     request.user = user
+
+
+def _rotate_csrf(request) -> None:
+    rotate = getattr(request, "rotate_csrf", None)
+    if callable(rotate):
+        rotate()
 
 
 def _end_current(request) -> None:
@@ -334,10 +398,11 @@ def logout(request) -> None:
     """Sign this request's session out and delete its server-side record.
 
     The cookie is cleared in the browser *and* stops working on the server, so a copy of
-    it taken earlier is dead too.
+    it taken earlier is dead too. The CSRF token is replaced as well.
     """
     _end_current(request)
     request.session.clear()
+    _rotate_csrf(request)
     request.user = None
     request.login_session = None
 

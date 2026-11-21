@@ -34,6 +34,7 @@ def app(monkeypatch):
     monkeypatch.delenv("JONGO_MCP_TOKEN", raising=False)
     monkeypatch.delenv("JONGO_ENV", raising=False)
     ratelimit.limiter.reset()
+    auth.limiter.reset()
     app = Jongo("mcp_app", root=HERE, title="Notes", secret_key="k" * 40, dev=True)
 
     class Note(db.Model):
@@ -94,6 +95,7 @@ def app(monkeypatch):
                                whoami=whoami, wipe=wipe, explode=explode, refuse=refuse, go=go))
     yield app
     ratelimit.limiter.reset()
+    auth.limiter.reset()
     db.close_connections()
     db.models_registry.clear()
     db.models_registry.update(saved_models)
