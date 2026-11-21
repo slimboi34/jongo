@@ -234,6 +234,10 @@ def _condition(field: Field, lookup: str, value: Any) -> tuple[str, list]:
     if value is None and lookup == "iexact":
         return f"{column} IS NULL", []
     text = value if isinstance(value, str) else str(field.to_db(value))
+    if "\x00" in text:
+        # SQLite's LIKE/GLOB stop at a NUL, so "a\x00zzz" would match like "a" (or every row);
+        # PostgreSQL can't store NUL in text at all. A NUL term matches nothing on either.
+        return NEVER_MATCHES
     return connection.dialect().text_condition(column, lookup, text)
 
 

@@ -140,3 +140,47 @@ def test_stored_json_is_strictly_valid():
     Reading.create(data={"value": 1e308, "list": [-0.0, 3]})
     row = connection.get_connection().execute(f'SELECT json_valid(data) FROM "{Reading._meta.table}"').fetchone()
     assert row[0] == 1
+
+
+# ------------------------------------------------------- a NUL in a text lookup term ---
+
+PATTERN_LOOKUPS = ["contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "iexact"]
+
+
+@pytest.mark.parametrize("lookup", PATTERN_LOOKUPS)
+@pytest.mark.parametrize("term", ["\x00", "a\x00", "a\x00zzz", "\x00b"])
+def test_a_nul_in_a_pattern_lookup_matches_nothing(lookup, term):
+    class Doc(db.Model):
+        title = db.Text()
+
+    db.migrate()
+    for title in ("alpha", "beta", "gamma"):
+        Doc.create(title=title)
+    assert Doc.filter(**{f"title__{lookup}": term}).count() == 0
+    assert Doc.exclude(**{f"title__{lookup}": term}).count() == 3
+    assert Doc.filter(db.Q(**{f"title__{lookup}": term}) | db.Q(title="beta")).count() == 1
+
+
+def test_nul_terms_leave_search_and_ordinary_lookups_alone():
+    class Doc(db.Model):
+        title = db.Text()
+
+    db.migrate()
+    for title in ("alpha", "beta"):
+        Doc.create(title=title)
+    assert Doc.search("a\x00zzz", "title").count() == 0
+    assert Doc.filter(title__contains="a").count() == 2
+    assert Doc.filter(title__startswith="al").count() == 1
+
+
+@sqlite_only  # PostgreSQL can't store a NUL in text at all
+def test_exact_still_finds_a_stored_nul_on_sqlite():
+    class Doc(db.Model):
+        title = db.Text()
+
+    db.migrate()
+    Doc.create(title="a\x00b")
+    Doc.create(title="a")
+    assert [d.title for d in Doc.filter(title="a\x00b")] == ["a\x00b"]
+    assert Doc.filter(title__startswith="a\x00zzz").count() == 0  # used to match "a\x00b"
+    assert Doc.filter(title__iexact="a\x00").count() == 0  # used to match "a\x00b"
