@@ -5,6 +5,8 @@ Every test runs against a fresh database (in-memory SQLite by default, or the
 """
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta, timezone
+
 import pytest
 
 from jongo import db
@@ -226,3 +228,127 @@ def test_a_missing_value_for_a_real_field_still_says_required():
     with pytest.raises(connection.dialect().integrity_errors()) as caught:
         db.execute(f'INSERT INTO "{Note._meta.table}" ("body") VALUES (NULL)')
     assert integrity_to_validation(caught.value, Note).errors == {"body": "This field is required."}
+
+
+# ------------------------------------------ DateTime/Date lookups given ISO strings ---
+
+UTC = timezone.utc
+NOON = datetime(2024, 3, 10, 12, 0, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def events():
+    class Event(db.Model):
+        label = db.Text()
+        when = db.DateTime(null=True)
+
+    db.migrate()
+    for label, when in [("before", NOON - timedelta(seconds=1)), ("equal", NOON),
+                        ("half-second", NOON + timedelta(milliseconds=500)), ("hour", NOON + timedelta(hours=1))]:
+        Event.create(label=label, when=when)
+    Event.create(label="unset", when=None)
+    return Event
+
+
+def labels(queryset):
+    return sorted(event.label for event in queryset)
+
+
+# The same instant as NOON, spelled the ways a query parameter or a JSON body spells it.
+NOON_STRINGS = [
+    "2024-03-10T12:00:00Z",
+    "2024-03-10T12:00:00z",
+    "2024-03-10T12:00:00+00:00",
+    "2024-03-10T17:00:00+05:00",
+    "2024-03-10T07:00:00-05:00",
+    "2024-03-10 17:00:00+05:00",
+    "2024-03-10T12:00:00.000Z",
+    "2024-03-10T12:00:00.000000+00:00",
+    " 2024-03-10T12:00:00Z ",
+]
+
+
+@pytest.mark.parametrize("text", NOON_STRINGS)
+@pytest.mark.parametrize("lookup", ["exact", "ne", "gt", "gte", "lt", "lte"])
+def test_datetime_lookup_with_an_iso_string_matches_the_datetime(events, text, lookup):
+    key = "when" if lookup == "exact" else f"when__{lookup}"
+    assert labels(events.filter(**{key: text})) == labels(events.filter(**{key: NOON}))
+
+
+@pytest.mark.parametrize("text", NOON_STRINGS)
+def test_datetime_range_and_in_with_iso_strings(events, text):
+    assert labels(events.filter(when__gte=text, when__lt="2024-03-10T13:00:00Z")) == ["equal", "half-second"]
+    assert labels(events.filter(when__in=[text, "2024-03-10T18:00:00+05:00"])) == ["equal", "hour"]
+    assert labels(events.exclude(when=text)) == ["before", "half-second", "hour", "unset"]
+
+
+def test_expected_rows_for_the_reported_strings(events):
+    assert labels(events.filter(when="2024-03-10T12:00:00Z")) == ["equal"]
+    assert labels(events.filter(when__lt="2024-03-10T12:00:00Z")) == ["before"]
+    assert labels(events.filter(when__gt="2024-03-10T17:00:00+05:00")) == ["half-second", "hour"]
+    assert labels(events.filter(when__lte="2024-03-10T17:00:00+05:00")) == ["before", "equal"]
+
+
+def test_naive_strings_compare_like_naive_datetimes():
+    # A naive value stays naive (it round-trips to an equal naive datetime), so a naive string
+    # behaves exactly like the naive datetime it names: against naive rows it matches exactly.
+    class Shift(db.Model):
+        label = db.Text()
+        start = db.DateTime()
+
+    db.migrate()
+    base = datetime(2024, 3, 10, 12, 0, 0)
+    for label, offset in [("early", -1), ("noon", 0), ("late", 3600)]:
+        Shift.create(label=label, start=base + timedelta(seconds=offset))
+    for text in ("2024-03-10 12:00:00", "2024-03-10T12:00:00", "2024-03-10T12:00", "2024-03-10T12:00:00.000000"):
+        for lookup in ("exact", "gt", "gte", "lt", "lte"):
+            key = "start" if lookup == "exact" else f"start__{lookup}"
+            assert labels(Shift.filter(**{key: text})) == labels(Shift.filter(**{key: base})), (text, lookup)
+    assert labels(Shift.filter(start="2024-03-10 12:00:00")) == ["noon"]
+    assert labels(Shift.filter(start__gte="2024-03-10")) == ["early", "late", "noon"]  # a date is midnight
+    assert labels(Shift.filter(start__lt="2024-03-11")) == ["early", "late", "noon"]
+
+
+def test_unparseable_datetime_strings_are_still_compared_as_text(events):
+    assert labels(events.filter(when__startswith="2024-03-10T12:00:00.5")) == ["half-second"]
+    assert labels(events.filter(when__contains="T13:")) == ["hour"]
+    assert events.filter(when="not a date").count() == 0
+    assert labels(events.filter(when__gt="2024")) == ["before", "equal", "half-second", "hour"]
+
+
+def test_date_lookups_accept_full_datetime_strings():
+    class Entry(db.Model):
+        day = db.Date()
+
+    db.migrate()
+    for day in (date(2024, 3, 9), date(2024, 3, 10), date(2024, 3, 11)):
+        Entry.create(day=day)
+
+    def days(qs):
+        return sorted(entry.day.isoformat() for entry in qs)
+
+    assert days(Entry.filter(day="2024-03-10")) == ["2024-03-10"]
+    assert days(Entry.filter(day=" 2024-03-10 ")) == ["2024-03-10"]
+    assert days(Entry.filter(day="2024-03-10T08:30:00")) == ["2024-03-10"]
+    assert days(Entry.filter(day="2024-03-10T23:30:00-05:00")) == ["2024-03-11"]  # its UTC date
+    assert days(Entry.filter(day="2024-03-10T00:30:00+05:00")) == ["2024-03-09"]
+    assert days(Entry.filter(day__gte="2024-03-10T00:00:00Z")) == ["2024-03-10", "2024-03-11"]
+    assert days(Entry.filter(day__lt="2024-03-10 12:00:00")) == ["2024-03-09"]
+    assert days(Entry.filter(day__in=["2024-03-09T10:00:00Z", "2024-03-11"])) == ["2024-03-09", "2024-03-11"]
+    assert Entry.filter(day="nonsense").count() == 0
+
+
+def test_datetime_default_given_as_a_string_fills_existing_rows_normalised():
+    class Task(db.Model):
+        title = db.Text()
+
+    db.migrate()
+    Task.create(title="old")
+
+    class Task(db.Model):  # noqa: F811
+        title = db.Text()
+        due = db.DateTime(default="2024-03-10T17:00:00+05:00")
+
+    db.migrate()
+    assert Task.get(title="old").due == NOON
+    assert Task.filter(due=NOON).count() == 1
