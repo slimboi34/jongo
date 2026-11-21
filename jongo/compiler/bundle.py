@@ -10,8 +10,12 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +90,16 @@ def _fail(message, hint=None, code="J102"):
     raise CompileError(message, hint=hint, code=code)
 
 
+def js_unit_name(base: str) -> str:
+    """A valid JavaScript identifier for a module-qualified unit name.
+
+    Module names come from file names, so ``14_shared_validation.Form`` would otherwise
+    become ``const 14_shared_validation__Form``, which isn't JavaScript at all.
+    """
+    name = re.sub(r"\W", "_", base)
+    return "_" + name if not name or name[0].isdigit() else name
+
+
 class Bundler:
     def __init__(self, roots=()):
         self.roots = [Path(r).resolve() for r in roots]
@@ -98,7 +112,7 @@ class Bundler:
     # -- units -----------------------------------------------------------------
 
     def _reserve(self, base: str) -> str:
-        base = re.sub(r"\W", "_", base)
+        base = js_unit_name(base)
         name, n = base, 1
         while name in self._names:
             n += 1
@@ -225,6 +239,56 @@ class Bundler:
             + footer
             + "\n})();\n"
         )
+
+
+def check_syntax(js: str) -> None:
+    """Parse the finished bundle with ``node --check`` when node is installed; skip otherwise.
+
+    A slip in the compiler that emits invalid JavaScript takes down every component on every
+    page, so ``jongo check`` (and every start-up check) asks a real JavaScript parser.
+
+    Raises:
+        CompileError: code ``J100``, naming the bundle line and the unit it was compiled from.
+    """
+    node = shutil.which("node")
+    if not node:
+        return
+    fd, path = tempfile.mkstemp(suffix=".js", prefix="jongo-bundle-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(js)
+        try:
+            proc = subprocess.run([node, "--check", path], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return  # node is there but can't run: nothing to report about the bundle
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if proc.returncode == 0:
+        return
+    stderr = proc.stderr.splitlines()
+    match = re.search(r":(\d+)\s*$", stderr[0]) if stderr else None
+    lineno = int(match.group(1)) if match else None
+    error = next((line.strip() for line in stderr if "Error" in line), "SyntaxError")
+    lines = js.split("\n")
+    unit = None
+    if lineno:
+        for line in reversed(lines[:lineno]):
+            found = re.match(r"const (\w+) = ", line)
+            if found:
+                unit = found.group(1)
+                break
+    where = f" at bundle line {lineno}" if lineno else ""
+    source = lines[lineno - 1].strip()[:200] if lineno and lineno <= len(lines) else None
+    raise CompileError(
+        f"the compiled browser bundle isn't valid JavaScript ({error}){where}"
+        + (f", in the code compiled for {unit}" if unit else ""),
+        source_line=source, code="J100",
+        hint="this is a bug in Jongo's compiler: please report it with this message. Meanwhile, rewrite "
+             "the line it points at, or move that code into a @server function",
+    )
 
 
 def build_bundle(roots=(), components=None) -> tuple[str, str]:

@@ -764,8 +764,10 @@ class Jongo:
 
     def check(self) -> None:
         """Compile every component now so errors surface at startup instead of first request."""
+        from .compiler.bundle import check_syntax
+
         self._bundle = None
-        self.bundle()
+        check_syntax(self.bundle()[0])  # node --check, when node is installed
 
     def run(self, host: str = "127.0.0.1", port: int = 8000, **kwargs):
         from .server import serve
