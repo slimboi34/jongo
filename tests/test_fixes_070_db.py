@@ -6,6 +6,7 @@ Every test runs against a fresh database (in-memory SQLite by default, or the
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -352,3 +353,96 @@ def test_datetime_default_given_as_a_string_fills_existing_rows_normalised():
     db.migrate()
     assert Task.get(title="old").due == NOON
     assert Task.filter(due=NOON).count() == 1
+
+
+# ------------------------------------------------------- integers beyond 64 bits ---
+
+BIG = 2**63  # one past the largest INTEGER (BIGINT on PostgreSQL)
+
+
+@pytest.fixture
+def numbers():
+    class Owner(db.Model):
+        name = db.Text()
+
+    class Num(db.Model):
+        n = db.Int(null=True)
+        owner = db.ForeignKey(Owner, null=True)
+
+    db.migrate()
+    owner = Owner.create(name="o")
+    for value in (-5, 0, 7, 2**63 - 1, -(2**63), None):
+        Num.create(n=value, owner=owner if value == 7 else None)
+    return SimpleNamespace(Num=Num, Owner=Owner, owner=owner)
+
+
+def test_int_field_rejects_values_beyond_64_bits_with_j304(numbers):
+    Num = numbers.Num
+    for value in (BIG, -BIG - 1, 2**70, "9223372036854775808", 1e19):
+        with pytest.raises(db.ValidationError) as caught:
+            Num.create(n=value)
+        assert caught.value.code == "J304"
+        assert caught.value.errors == {"n": "Enter a whole number between -9223372036854775808 and "
+                                            "9223372036854775807."}
+    with pytest.raises(db.ValidationError, match="between"):
+        Num.all().update(n=2**70)
+    with pytest.raises(db.ValidationError, match="between"):
+        db.Int().clean("99999999999999999999")
+    assert Num.create(n=2**63 - 1).n == 2**63 - 1 and Num.create(n=-(2**63)).n == -(2**63)
+
+
+def test_foreign_key_and_explicit_id_beyond_64_bits_are_validation_errors(numbers):
+    with pytest.raises(db.ValidationError) as caught:
+        numbers.Num.create(owner_id=BIG)
+    assert list(caught.value.errors) == ["owner"] and "out of range" in caught.value.errors["owner"]
+    with pytest.raises(db.ValidationError) as caught:
+        numbers.Num(id=BIG, n=1).save()
+    assert caught.value.errors == {"id": "Enter a whole number between -9223372036854775808 and "
+                                         "9223372036854775807."}
+    field = numbers.Num._meta.field("owner")
+    with pytest.raises(db.ValidationError, match="out of range"):
+        field.clean(str(BIG))
+
+
+def test_lookups_with_out_of_range_ints_match_like_python_would(numbers):
+    Num = numbers.Num
+
+    def values(**lookups):
+        return sorted((num.n for num in Num.filter(**lookups)), key=lambda v: (v is None, v or 0))
+
+    stored = [-(2**63), -5, 0, 7, 2**63 - 1]
+    for big in (BIG, 2**70, float(2**64)):
+        assert values(n=big) == [] and values(id=big) == [] and values(pk=big) == []
+        assert values(n__gt=big) == [] and values(n__gte=big) == []
+        assert values(n__lt=big) == stored and values(n__lte=big) == stored
+        assert values(n__gt=-big - 1) == stored and values(n__gte=-big - 1) == stored
+        assert values(n__lt=-big - 1) == [] and values(n__lte=-big - 1) == []
+        assert values(n__ne=big) == [*stored, None]  # ne includes NULL, as ne=<any value> does
+        assert values(n__in=[big]) == [] and values(n__in=[big, 7]) == [7]
+        assert values(owner=big) == [] and values(owner__id=big) == []
+        assert Num.exclude(n=big).count() == 6
+    with pytest.raises(Num.DoesNotExist):
+        Num.get(id=BIG)
+    with pytest.raises(numbers.Owner.DoesNotExist):
+        numbers.Owner.get(pk=-BIG - 1)
+    assert Num.filter(id=BIG).update(n=1) == 0 and Num.filter(id=BIG).delete() == 0
+
+
+def test_impossible_in_candidates_do_not_match_null_rows(numbers):
+    Num = numbers.Num
+    assert Num.filter(n__in=["abc"]).count() == 0  # used to compile to "n IS NULL"
+    assert [num.n for num in Num.filter(n__in=["abc", 7])] == [7]
+    assert [num.n for num in Num.filter(n__in=[None])] == [None]
+    assert sorted(Num.filter(n__in=[None, 0]).values_list("n", flat=True), key=lambda v: v is None) == [0, None]
+
+
+def test_float_field_reports_ints_too_large_for_a_float():
+    class Measure(db.Model):
+        x = db.Float(null=True)
+
+    db.migrate()
+    with pytest.raises(db.ValidationError, match="finite number"):
+        Measure.create(x=10**400)
+    with pytest.raises(db.ValidationError, match="finite number"):
+        Measure.filter(x=10**400).count()
+    assert Measure.create(x=2**70).x == float(2**70)

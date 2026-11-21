@@ -29,6 +29,14 @@ NOTHING: Any = _Nothing()
 ON_DELETE_ACTIONS = ("CASCADE", "SET NULL", "RESTRICT", "NO ACTION")
 TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+#: What an INTEGER column holds: 64-bit signed on SQLite, BIGINT on PostgreSQL.
+INT_MIN, INT_MAX = -(2**63), 2**63 - 1
+INT_RANGE_MESSAGE = f"Enter a whole number between {INT_MIN} and {INT_MAX}."
+
+
+def int_out_of_range(value: Any) -> bool:
+    """True for an ``int`` (not a ``bool``) that no INTEGER column can hold."""
+    return isinstance(value, int) and not isinstance(value, bool) and not INT_MIN <= value <= INT_MAX
 
 
 class ValidationError(Diagnostic, Exception):
@@ -282,6 +290,11 @@ class Int(Field):
             self.fail("Enter a whole number.")
         return int(number)
 
+    def validate(self, value: Any) -> None:
+        super().validate(value)
+        if int_out_of_range(value):  # the driver would raise OverflowError (a 500) on the write
+            self.fail(INT_RANGE_MESSAGE)
+
 
 class Float(Field):
     sql_type = "REAL"
@@ -294,6 +307,8 @@ class Float(Field):
             number = float(value)
         except (TypeError, ValueError):
             return value
+        except OverflowError:  # an int beyond any float, e.g. 10**400
+            number = math.inf
         if not math.isfinite(number):  # SQLite stores NaN as NULL and can't round-trip inf reliably
             self.fail("Enter a finite number (not NaN or infinity).")
         return number
@@ -308,6 +323,8 @@ class Float(Field):
             return float(value.strip() if isinstance(value, str) else value)
         except (TypeError, ValueError):
             self.fail("Enter a number.")
+        except OverflowError:  # an int beyond any float, e.g. 10**400
+            self.fail("Enter a finite number (not NaN or infinity).")
 
 
 class Bool(Field):
@@ -596,6 +613,11 @@ class ForeignKey(Field):
         if isinstance(value, str) and value.strip().isdigit():
             return int(value.strip())
         self.fail("Select a valid choice.")
+
+    def validate(self, value: Any) -> None:
+        super().validate(value)
+        if int_out_of_range(value):  # no row can have that id; the driver would raise OverflowError
+            self.fail("Select a valid choice; that id is out of range.")
 
     def clean(self, value: Any) -> Any:
         value = super().clean(value)

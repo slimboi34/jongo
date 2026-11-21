@@ -6,7 +6,7 @@ from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from . import connection
-from .fields import DateTime, Field, ForeignKey, ValidationError, utcnow
+from .fields import DateTime, Field, ForeignKey, ValidationError, int_out_of_range, utcnow
 from ..errors import Diagnostic
 
 
@@ -209,7 +209,15 @@ def compile_lookup(model: type[Model], key: str, value: Any) -> tuple[str, list]
 
 
 NEVER_MATCHES = ("0 = 1", [])
+ALWAYS_MATCHES = ("1 = 1", [])
 _NUMERIC_KINDS = ("int", "float", "fk")
+
+
+class _OutOfRange:
+    """A lookup value beyond any INTEGER column: above every stored value (``sign`` 1) or below it (-1)."""
+
+    def __init__(self, sign: int):
+        self.sign = sign
 
 
 def _db_value(field: Field, value: Any) -> tuple[bool, Any]:
@@ -219,10 +227,15 @@ def _db_value(field: Field, value: Any) -> tuple[bool, Any]:
     numeric column compared against "not a number". SQLite compares those as text
     and simply matches nothing; PostgreSQL rejects the parameter outright, so the
     comparison is dropped here and both backends behave the same.
+
+    Returns ``(False, _OutOfRange)`` for an integer no INTEGER column can hold (the
+    driver would raise ``OverflowError``): equal to no row, above or below every one.
     """
     converted = field.to_db(value)
     if field.kind in _NUMERIC_KINDS and isinstance(converted, str):
         return False, None
+    if field.kind in ("int", "fk") and int_out_of_range(converted):
+        return False, _OutOfRange(1 if converted > 0 else -1)
     return True, converted
 
 
@@ -237,12 +250,20 @@ def _condition(field: Field, lookup: str, value: Any) -> tuple[str, list]:
         if value is None:
             return connection.dialect().not_equal(column), [None]
         ok, converted = _db_value(field, value)
-        return (connection.dialect().not_equal(column), [converted]) if ok else (f"{column} IS NOT NULL", [])
+        if ok:
+            return connection.dialect().not_equal(column), [converted]
+        if isinstance(converted, _OutOfRange):
+            return ALWAYS_MATCHES  # NULL rows too, as ne=<any other value> includes them
+        return f"{column} IS NOT NULL", []
     if lookup == "isnull":
         return (f"{column} IS NULL" if value else f"{column} IS NOT NULL"), []
     if lookup in COMPARISONS:
         ok, converted = _db_value(field, value)
-        return (f"{column} {COMPARISONS[lookup]} ?", [converted]) if ok else NEVER_MATCHES
+        if ok:
+            return f"{column} {COMPARISONS[lookup]} ?", [converted]
+        if isinstance(converted, _OutOfRange) and (lookup in ("lt", "lte")) == (converted.sign > 0):
+            return f"{column} IS NOT NULL", []  # every stored integer is below (or above) the bound
+        return NEVER_MATCHES
     if lookup == "in":
         return _in_condition(field, column, value)
     if value is None and lookup == "iexact":
@@ -262,7 +283,9 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
         raise TypeError(f'The "in" lookup expects a list, tuple, set or QuerySet, not {type(value).__name__}.')
     converted = [_db_value(field, item) for item in value]
-    values = [item for ok, item in converted if ok or item is None]
+    # Impossible candidates ("abc" for a number, an int beyond 64 bits) match no row, and must
+    # not turn into "IS NULL"; a None in the list arrives here as (True, None) and does.
+    values = [item for ok, item in converted if ok]
     if not values and converted:  # every candidate was an impossible value
         return NEVER_MATCHES
     present = [item for item in values if item is not None]
