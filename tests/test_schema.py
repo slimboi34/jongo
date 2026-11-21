@@ -222,7 +222,11 @@ def test_the_openapi_document_covers_functions_pages_and_routes(app):
     assert add["operationId"] == "add_product" and add["summary"] == "Add a product to the catalogue."
     assert add["description"] == "Prices are in pounds."
     body = add["requestBody"]["content"]["application/json"]["schema"]
-    assert body["properties"]["kwargs"]["required"] == ["name", "price"]
+    # 0.7.0: the browser sends positional args, so neither key is required by itself; the
+    # anyOf lists each way of covering name and price (all by name, mixed, all by position).
+    assert "required" not in body["properties"]["kwargs"] and "required" not in body
+    assert [shape["required"] for shape in body["anyOf"]] == [["kwargs"], ["args", "kwargs"], ["args"]]
+    assert body["anyOf"][0]["properties"]["kwargs"]["required"] == ["name", "price"]
     assert body["properties"]["args"]["maxItems"] == 4 and "name, price, tags, category" in \
         body["properties"]["args"]["description"]
     ok = add["responses"]["200"]["content"]["application/json"]["schema"]["anyOf"][0]

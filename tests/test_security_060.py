@@ -32,8 +32,10 @@ def clean(monkeypatch):
     use_test_database()
     monkeypatch.setattr(auth, "ITERATIONS", 1000)
     ratelimit.limiter.reset()
+    auth.limiter.reset()
     yield
     ratelimit.limiter.reset()
+    auth.limiter.reset()
     hub.clear()
     db.close_connections()
     db.models_registry.clear()
@@ -148,21 +150,23 @@ def test_a_server_function_over_its_limit_gets_429_and_does_not_run():
 
 
 def test_limits_are_per_caller_user_when_signed_in_address_otherwise():
-    app = make_app()
+    app = make_app(trust_proxy=True)   # so each client below can come from its own address
 
     @server(rate_limit="2/minute")
     def ping(request) -> str:
         return "pong"
 
+    def call(client, address):
+        return client.post(f"/_jongo/rpc/{ping.id}", json={"args": [], "kwargs": {}},
+                           headers={"X-Forwarded-For": address}).status
+
     ann, bob = auth.User.create_user("ann", "pw-ann"), auth.User.create_user("bob", "pw-bob")
     a, b, anonymous = TestClient(app), TestClient(app), TestClient(app)
     a.login(ann)
     b.login(bob)
-    assert a.rpc(ping) == a.rpc(ping) == "pong"
-    with pytest.raises(ServerError):
-        a.rpc(ping)
-    assert b.rpc(ping) == "pong", "another user has their own counter"
-    assert anonymous.rpc(ping) == "pong", "and so does an anonymous address"
+    assert [call(a, "10.0.0.1") for _ in range(3)] == [200, 200, 429]
+    assert call(b, "10.0.0.2") == 200, "another user has their own counter"
+    assert call(anonymous, "10.0.0.3") == 200, "and so does an anonymous address"
 
 
 def test_pages_and_routes_take_a_rate_limit_too():
@@ -212,8 +216,9 @@ def test_password_guessing_is_throttled_per_username(monkeypatch):
         auth.authenticate("ann", "right")
     assert caught.value.status == 429 and caught.value.code == "J213" and caught.value.retry_after >= 1
     assert "sign-in attempts" in caught.value.message
-    with pytest.raises(TooManyRequests):
-        auth.authenticate("ANN ", "right")          # the key is case- and space-insensitive
+    # The key is the exact username the account is looked up by (0.7.0): "ANN " is another
+    # name, not another spelling of ann, and can never sign in as ann.
+    assert auth.authenticate("ANN ", "right") is None
     assert auth.authenticate("someone-else", "x") is None, "another username isn't locked"
 
 
@@ -233,7 +238,7 @@ def test_a_correct_password_clears_the_count_and_the_window_expires(monkeypatch)
     monkeypatch.setattr(auth, "LOGIN_ATTEMPTS", 3)
     db.migrate()
     now = [0.0]
-    monkeypatch.setattr(ratelimit.limiter, "_clock", lambda: now[0])
+    monkeypatch.setattr(auth.limiter, "_clock", lambda: now[0])
     auth.User.create_user("ann", "right")
     auth.authenticate("ann", "x"), auth.authenticate("ann", "y")
     assert auth.authenticate("ann", "right").username == "ann"
