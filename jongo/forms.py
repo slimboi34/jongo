@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import re
 import sys
+import warnings
 
 from .errors import JongoError
 from .html import input_, label, option, select, span, textarea
@@ -81,6 +82,10 @@ _TYPES = ("text", "email", "int", "float", "bool", "choice")
 #: like ``SERVER_FUNCTIONS`` and ``COMPONENTS``.
 SCHEMAS: dict[int, "Schema"] = {}
 
+#: Model fields :meth:`Schema.from_model` leaves out unless ``only=`` names them: a form built
+#: from ``auth.User`` must not let a visitor set ``is_admin`` or write a password hash.
+PRIVILEGED_FIELDS = frozenset(("is_admin", "is_staff", "is_superuser", "password"))
+
 
 # ----------------------------------------------------------------------------- patterns --
 
@@ -95,7 +100,12 @@ _PYTHON_ONLY = (
     (r"(?<!\\)(?:\\\\)*\\[AZzGNpP]", r"\A, \Z, \z, \N{...} and \p{...}"),
     (r"(?<!\\)(?:[*+?]|\})\+", "possessive quantifiers (*+, ++, ?+)"),
     (r"\(\?<[A-Za-z_]", "named groups (?<name>...)"),
+    (r"(?<!\\)(?:\\\\)*\\[aU]", r"\a and \U escapes"),
+    (r"(?<!\\)(?:\\\\)*\\0[0-9]", r"octal escapes like \012"),
 )
+#: A quantifier in braces: {m}, {m,} or {m,n}. Any other brace outside [...] (a literal {, a
+#: lone }, Python's {,n}) is read differently, or refused, by JavaScript's Unicode mode.
+_BRACE_QUANTIFIER = re.compile(r"\{[0-9]+(?:,[0-9]*)?\}")
 
 
 def portable_pattern(pattern: str) -> str:
@@ -114,7 +124,8 @@ def portable_pattern(pattern: str) -> str:
 
     Raises:
         JongoError: code ``J115`` when the pattern uses syntax only one engine has (named
-            groups, inline flags, ``\\A``/``\\Z``, possessive quantifiers), or doesn't compile.
+            groups, inline flags, ``\\A``/``\\Z``, ``\\a``, ``\\U``, octal escapes, possessive
+            quantifiers, ``{,n}``, an unescaped literal ``{`` or ``}``), or doesn't compile.
 
     Example::
 
@@ -161,6 +172,17 @@ def portable_pattern(pattern: str) -> str:
             continue
         if ch == "]" and in_class:
             in_class = False
+        elif ch in "{}" and not in_class:
+            quantifier = _BRACE_QUANTIFIER.match(pattern, i) if ch == "{" else None
+            if quantifier is None:
+                what = "a {,n} quantifier" if pattern.startswith("{,", i) else f"a literal {ch}"
+                raise JongoError(
+                    f"the pattern {pattern!r} uses {what}, which Python and JavaScript don't read the same way",
+                    code="J115", hint=f"escape a literal brace as \\{ch}, and write {{,n}} as {{0,n}}",
+                )
+            out.append(quantifier.group())
+            i = quantifier.end()
+            continue
         elif ch == "." and not in_class:
             out.append("[^\\n\\r]")
             i += 1
@@ -572,9 +594,15 @@ class Schema(dict):
         model, so the form can't drift from the table. Fields that aren't ``editable``,
         ``auto_now`` timestamps and types a form can't express (JSON) are left out.
 
+        Privileged fields (``is_admin``, ``is_staff``, ``is_superuser``, ``password``: see
+        :data:`PRIVILEGED_FIELDS`) are left out too unless ``only=`` names them, so a schema
+        built from ``auth.User`` can't make a visitor an admin. Prefer ``only=``: a form should
+        list what it lets people change.
+
         Parameters:
             model: the model class.
-            only: field names to include (default: every editable field).
+            only: field names to include (default: every editable field except the privileged
+                ones). A field named here is included even if it is privileged.
             exclude: field names to leave out.
             name: the schema's name (default: the model's name + ``"Form"``).
 
@@ -588,15 +616,19 @@ class Schema(dict):
                 email = db.Text(max_length=200, unique=True)
                 role = db.Text(max_length=20, default="member", choices=["member", "admin"])
 
-            InviteForm = forms.Schema.from_model(Invite)
+            InviteForm = forms.Schema.from_model(Invite, only=["email", "role"])
         """
         from .db import fields as dbf
 
         rules = {}
+        skipped = []
         for field in model._meta.fields:
             if only is not None and field.name not in only:
                 continue
             if field.name in exclude or not getattr(field, "editable", True):
+                continue
+            if only is None and field.name in PRIVILEGED_FIELDS:
+                skipped.append(field.name)
                 continue
             required = bool(field.required)
             common = {"required": required, "label": field.label, "help": getattr(field, "help", None) or None}
@@ -623,6 +655,13 @@ class Schema(dict):
                 if not check(probe, default, None):  # a default the form's own rules accept
                     rule["default"] = default
             rules[key] = rule
+        if skipped:
+            from .diagnostics import declared_production
+
+            if not declared_production():
+                warnings.warn(
+                    f"Schema.from_model({model.__name__}) left out {', '.join(skipped)}: privileged fields are only "
+                    "included when only=[...] names them", stacklevel=2)
         return cls(name or f"{model.__name__}Form", **rules)
 
 
@@ -638,7 +677,11 @@ def _convert(rule: dict, value):
             return rule["default"]
         return "" if kind in ("text", "email") else None
     if kind == "int":
-        return int(value.strip()) if isinstance(value, str) else int(value)
+        if not isinstance(value, str):
+            return int(value)
+        text = value.strip()  # leading zeros are dropped first: int() refuses over 4300 digits
+        digits = (text[1:] if text[:1] == "-" else text).lstrip("0") or "0"
+        return -int(digits) if text[:1] == "-" else int(digits)
     if kind == "float":
         return float(value.strip()) if isinstance(value, str) else float(value)
     if kind == "choice":
@@ -702,13 +745,18 @@ def check(rule, value, values=None):
         if isinstance(value, str):
             text = value.strip()
             if kind == "int" and matches(_INT, text):
-                number = int(text)
+                # More than 16 significant digits is past what a JavaScript number holds (and
+                # thousands of digits would make Python's int() raise), so it isn't a number here.
+                negative = text[:1] == "-"
+                digits = (text[1:] if negative else text).lstrip("0") or "0"
+                if len(digits) <= 16:
+                    number = -int(digits) if negative else int(digits)
             elif kind == "float" and matches(_FLOAT, text):
                 number = float(text)
         elif isinstance(value, (int, float)):
             if kind == "float" or value % 1 == 0:
                 number = value
-        if number is None:
+        if number is None or number != number:  # NaN (from JSON or Python) compares false with every bound
             return messages["type"]
         if kind == "int" and (number > _MAX_SAFE or number < -_MAX_SAFE):
             return messages["type"]

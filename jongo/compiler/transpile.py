@@ -34,8 +34,26 @@ BUILTINS = frozenset(
     """len str int float bool list dict set frozenset tuple range enumerate zip sorted reversed sum min max abs
     round any all map filter print isinstance repr chr ord divmod pow bin oct hex hasattr getattr setattr callable
     Exception BaseException ValueError TypeError KeyError IndexError AttributeError RuntimeError
-    AssertionError ZeroDivisionError NotImplementedError""".split()
+    AssertionError ZeroDivisionError NotImplementedError OverflowError""".split()
 )
+
+#: The methods pyrt.js implements for each builtin type ($STR, $LIST, $DICT, $SET). A method
+#: read without a call (``key=scores.get``, ``map(str.upper, xs)``) compiles to a bound or
+#: unbound wrapper instead of a property read; tests/test_fixes_070_compiler.py checks this
+#: table against pyrt.js.
+RUNTIME_METHODS = {
+    "str": frozenset("""upper lower strip lstrip rstrip split rsplit partition rpartition removeprefix
+        removesuffix splitlines join startswith endswith replace find rfind index rindex count title capitalize
+        swapcase casefold isdigit isdecimal isnumeric isalpha isalnum isspace isupper islower format zfill ljust
+        rjust center""".split()),
+    "list": frozenset("append extend insert pop remove index count sort reverse copy clear".split()),
+    "dict": frozenset("get keys values items pop update setdefault copy clear".split()),
+    "set": frozenset("""add discard remove union intersection difference symmetric_difference issubset
+        issuperset isdisjoint update copy clear""".split()),
+}
+RUNTIME_METHODS["tuple"] = frozenset(("index", "count"))
+RUNTIME_METHODS["frozenset"] = RUNTIME_METHODS["set"]
+ALL_RUNTIME_METHODS = frozenset().union(*RUNTIME_METHODS.values())
 
 UNSUPPORTED_HINTS = {
     "Import": "import at the top of the module; the compiler resolves imported names for you",
@@ -203,7 +221,7 @@ class FunctionTranspiler:
             ident = js_ident(param)
             js_params.append(f"{ident} = {defaults[i - first_default]}" if i >= first_default else ident)
         if star:
-            js_params.append(f"{js_ident(star)} = []")
+            js_params.append(f"{js_ident(star)} = $tup([])")
         for param, default in zip(kwonly, kw_defaults):
             js_params.append(f"{js_ident(param)} = {default}" if default is not None else js_ident(param))
         if dstar:
@@ -544,7 +562,7 @@ class FunctionTranspiler:
         """
         import types
 
-        from .bundle import BROWSER_MODULES
+        from .bundle import BROWSER_MODULE_MEMBERS, BROWSER_MODULES
 
         chain = []
         base = node
@@ -561,7 +579,14 @@ class FunctionTranspiler:
             return False, None
         dotted = base.id
         for attr in reversed(chain):
-            if not isinstance(obj, types.ModuleType) or obj.__name__ in BROWSER_MODULES:
+            if isinstance(obj, types.ModuleType) and obj.__name__ in BROWSER_MODULES:
+                members = BROWSER_MODULE_MEMBERS[obj.__name__]
+                if attr not in members:
+                    self.error(node, f"{obj.__name__}.{attr} isn't available in browser code", code="J103",
+                               hint=f"the browser's {obj.__name__} module has {', '.join(sorted(members))}; "
+                                    "use one of those, or do this in a @server function")
+                return False, None
+            if not isinstance(obj, types.ModuleType):
                 return False, None
             if not hasattr(obj, attr):
                 self.error(node, f"module {obj.__name__!r} has no attribute {attr!r}", code="J103",
@@ -576,11 +601,39 @@ class FunctionTranspiler:
 
         return True, self.resolve(dotted.replace(".", "__"), obj, fail)
 
+    def _numeric_receiver(self, node):
+        """``(7).numerator``: no attribute of a number exists in the browser, and ``7.numerator``
+        isn't even valid JavaScript (it would break the whole bundle), so say so now."""
+        if _is_num(node.value):
+            self.error(node, f"attributes of a number ({type(node.value.value).__name__}.{node.attr}) aren't "
+                             "available in browser code", "compute it in Python and pass it in, or use a "
+                             "builtin such as int(), round() or abs()", "J104")
+
+    def _builtin_method(self, node):
+        """``str.lower`` / ``dict.get``: a builtin type's method, used as a function."""
+        value = node.value
+        if not isinstance(value, ast.Name) or value.id not in RUNTIME_METHODS:
+            return None
+        if any(value.id in scope.locals for scope in self.scopes):
+            return None
+        if value.id in self.closure or value.id in self.fn.__globals__:
+            return None
+        if node.attr not in RUNTIME_METHODS[value.id]:
+            self.error(node, f"{value.id}.{node.attr} isn't available in browser code", code="J103",
+                       hint=f"call the method on the value instead (x.{node.attr}(...)), or do this in a @server function")
+        return f"$um({js_string(node.attr)})"
+
     def x_Attribute(self, node):
         found, js = self._module_member(node)
         if found:
             return js
+        self._numeric_receiver(node)
+        unbound = self._builtin_method(node)
+        if unbound:
+            return unbound
         obj = self.expr(node.value)
+        if node.attr in ALL_RUNTIME_METHODS and not obj.startswith("$modules."):
+            return f"$bm({obj}, {js_string(node.attr)})"  # a bound method, as Python reads it
         if self._dollar_attr(node.attr):
             return f"$ga({obj}, {js_string(node.attr)})"
         return f"{obj}.{node.attr}"
@@ -642,7 +695,8 @@ class FunctionTranspiler:
                                f"{k.arg}= isn't an event handler, so this function would never be called",
                                f"write on_{event}= instead of {k.arg}=", "J114")
         args, kw = self.call_args(node)
-        if isinstance(func, ast.Attribute) and not self._module_member(func)[0]:
+        if isinstance(func, ast.Attribute) and not self._module_member(func)[0] and not self._builtin_method(func):
+            self._numeric_receiver(func)
             obj = self.expr(func.value)
             tail = f", {kw}" if kw else ""
             return f"$m({obj}, {js_string(func.attr)}, [{', '.join(args)}]{tail})"
@@ -659,19 +713,30 @@ class FunctionTranspiler:
             if _is_str(left_node) or _is_str(right_node) or (_is_num(left_node) and _is_num(right_node)):
                 return f"({left} + {right})"
             return f"$add({left}, {right})"
-        if kind is ast.Mult:
+        if kind is ast.Mult and not inplace:
             if _is_num(left_node) and _is_num(right_node):
                 return f"({left} * {right})"
             return f"$mul({left}, {right})"
-        if kind is ast.Sub:
+        if kind is ast.Sub and not inplace:
             if _is_num(left_node) and _is_num(right_node):
                 return f"({left} - {right})"
             return f"$sub({left}, {right})"  # set difference when both are sets
-        simple = {
-            ast.Div: "/", ast.Pow: "**",
-        }
-        if kind in simple:
-            return f"({left} {simple[kind]} {right})"
+        if kind is ast.Div:
+            # Python raises ZeroDivisionError where JavaScript answers Infinity/NaN, so only a
+            # literal non-zero divisor compiles to a bare "/".
+            if _is_num(right_node) and right_node.value != 0:
+                return f"({left} / {right})"
+            return f"$div({left}, {right})"
+        if kind is ast.Pow:
+            if _is_num(right_node) and right_node.value >= 0:
+                return f"({left} ** {right})"
+            return f"$pow({left}, {right})"  # 0 ** -1 raises ZeroDivisionError
+        if inplace:
+            # x *= 2, s |= other...: mutate a list/set/dict in place, as Python does
+            mutating = {ast.Mult: "$imul", ast.BitOr: "$ior", ast.Sub: "$isub", ast.BitAnd: "$iand",
+                        ast.BitXor: "$ixor"}
+            if kind in mutating:
+                return f"{mutating[kind]}({left}, {right})"
         helpers = {
             ast.FloorDiv: "$floordiv", ast.Mod: "$mod", ast.BitOr: "$bor",
             ast.BitAnd: "$band", ast.BitXor: "$bxor",  # set intersection / symmetric difference
@@ -687,7 +752,9 @@ class FunctionTranspiler:
     def x_UnaryOp(self, node):
         if isinstance(node.op, ast.Not):
             return f"!{self.test(node.operand)}"
-        symbol = {ast.USub: "-", ast.UAdd: "+", ast.Invert: "~"}[type(node.op)]
+        if isinstance(node.op, ast.Invert):
+            return f"$invert({self.expr(node.operand)})"  # BigInt-backed, not JavaScript's 32-bit ~
+        symbol = {ast.USub: "-", ast.UAdd: "+"}[type(node.op)]
         return f"({symbol}{self.expr(node.operand)})"
 
     def x_BoolOp(self, node):
@@ -701,12 +768,29 @@ class FunctionTranspiler:
 
     def x_Compare(self, node):
         parts = []
+        temps = []
         left_node, left = node.left, self.expr(node.left)
-        for op, right_node in zip(node.ops, node.comparators):
+        last = len(node.ops) - 1
+        for i, (op, right_node) in enumerate(zip(node.ops, node.comparators)):
             right = self.expr(right_node)
-            parts.append(self.compare(op, left_node, left, right_node, right))
-            left_node, left = right_node, right
-        return parts[0] if len(parts) == 1 else "(" + " && ".join(parts) + ")"
+            if i < last and not isinstance(right_node, (ast.Name, ast.Constant)):
+                # a < f() < c evaluates f() once: bind the middle operand while comparing
+                temp = f"$c{len(temps) + 1}"
+                temps.append(temp)
+                parts.append(self.compare(op, left_node, left, right_node, f"({temp} = {right})"))
+                left = temp
+            else:
+                parts.append(self.compare(op, left_node, left, right_node, right))
+                left = right
+            left_node = right_node
+        if len(parts) == 1:
+            return parts[0]
+        chain = "(" + " && ".join(parts) + ")"
+        if not temps:
+            return chain
+        is_async = _has_await(node)
+        call = f"({'async ' if is_async else ''}() => {{ let {', '.join(temps)}; return {chain}; }})()"
+        return f"(await {call})" if is_async else call
 
     def compare(self, op, left_node, left, right_node, right) -> str:
         kind = type(op)
@@ -725,7 +809,11 @@ class FunctionTranspiler:
         if kind is ast.NotIn:
             return f"!$in({left}, {right})"
         symbol = {ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">="}[kind]
-        return f"({left} {symbol} {right})"
+        if _is_num(left_node) and _is_num(right_node):
+            return f"({left} {symbol} {right})"
+        # lists/tuples compare item by item, sets by inclusion, None or mixed types raise TypeError
+        helper = {ast.Lt: "$lt", ast.LtE: "$le", ast.Gt: "$gt", ast.GtE: "$ge"}[kind]
+        return f"{helper}({left}, {right})"
 
     def x_IfExp(self, node):
         return f"({self.test(node.test)} ? {self.expr(node.body)} : {self.expr(node.orelse)})"
@@ -750,7 +838,9 @@ class FunctionTranspiler:
             if key is None:
                 items.append(f"...{self.expr(value)}")
             elif isinstance(key, ast.Constant) and isinstance(key.value, str):
-                items.append(f"{js_string(key.value)}: {self.expr(value)}")
+                # a literal "__proto__": key would set the prototype; a computed key doesn't
+                name = f"[{js_string(key.value)}]" if key.value == "__proto__" else js_string(key.value)
+                items.append(f"{name}: {self.expr(value)}")
             else:
                 items.append(f"[$key({self.expr(key)})]: {self.expr(value)}")  # True/False key == 1/0
         return "({" + ", ".join(items) + "})"
@@ -767,7 +857,7 @@ class FunctionTranspiler:
             names.update(target_names(gen.target))
         self.scopes.append(_Scope(names, set()))
         try:
-            init = {"list": "[]", "set": "new Set()", "dict": "{}"}[kind]
+            init = {"list": "[]", "set": "new $PySet()", "dict": "{}"}[kind]  # $PySet: a local can't shadow it
             code = [f"const $r = {init};"]
             for i, gen in enumerate(generators):
                 iterable = "$i" if i == 0 else self.expr(gen.iter)
@@ -775,9 +865,9 @@ class FunctionTranspiler:
                 for cond in gen.ifs:
                     code.append(f"if (!{self.test(cond)}) continue;")
             if kind == "dict":
-                code.append(f"$r[$key({self.expr(node.key)})] = {self.expr(node.value)};")
+                code.append(f"$si($r, {self.expr(node.key)}, {self.expr(node.value)});")
             elif kind == "set":
-                code.append(f"$r.add($key({self.expr(node.elt)}));")
+                code.append(f"$r.add({self.expr(node.elt)});")
             else:
                 code.append(f"$r.push({self.expr(node.elt)});")
             code.append("}" * len(generators))
@@ -812,7 +902,8 @@ class FunctionTranspiler:
         parts = []
         for value in node.values:
             if isinstance(value, ast.Constant):
-                parts.append(value.value.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${"))
+                text = value.value.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+                parts.append(text.replace("\r", "\\r"))  # a raw CR in a template literal reads as \n
             elif isinstance(value, ast.FormattedValue):
                 inner = self.expr(value.value)
                 if value.conversion in (ord("r"), ord("a")):

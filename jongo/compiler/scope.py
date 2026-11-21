@@ -102,11 +102,14 @@ def analyse_function(node) -> tuple[Bindings, set[int]]:
     block_for: set[int] = set()
     if bindings.for_nodes:
         all_names = [n for stmt in body for n in ast.walk(stmt) if isinstance(n, ast.Name)]
+        # A nested function that says `nonlocal i` rebinds this function's i, so a loop over i
+        # can't use a per-iteration const (the assignment would throw in the browser).
+        rebound = {name for stmt in body for n in ast.walk(stmt) if isinstance(n, ast.Nonlocal) for name in n.names}
         for loop in bindings.for_nodes:
             if not is_plain_target(loop.target):
                 continue
             names = target_names(loop.target)
-            if any(bindings.store_counts.get(n, 0) != 1 or n in bindings.nonlocals for n in names):
+            if any(bindings.store_counts.get(n, 0) != 1 or n in bindings.nonlocals or n in rebound for n in names):
                 continue
             inside = {id(n) for n in ast.walk(loop)}
             if all(id(n) in inside for n in all_names if n.id in names):
