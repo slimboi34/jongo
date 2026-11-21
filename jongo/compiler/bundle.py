@@ -199,7 +199,7 @@ class Bundler:
             if isinstance(obj, VNode):
                 code = f"$build({json.dumps(serialize(obj))})"
             else:
-                code = json.dumps(to_json_data(obj, name))
+                code = json.dumps(to_json_data(obj, name, browser=True))
                 if '"$v"' in code:
                     code = f"$revive({code})"
         except JongoError as exc:

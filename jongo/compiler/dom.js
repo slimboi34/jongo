@@ -31,11 +31,12 @@ const $BLOCKED_ATTRS = new Set(["srcdoc"]); // srcdoc runs same-origin HTML
 const $SAFE_DATA_IMAGE = /^image\/(png|jpe?g|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon)/;
 function $dangerousUrl(v) {
   const s = String(v);
-  if (!s.includes(":")) return false;
-  const scheme = s.split(":", 1)[0].replace(/[\u0000-\u0020]/g, "").toLowerCase();
+  const colon = s.indexOf(":"); // (split(":", 1) in JS keeps one piece, unlike Python's maxsplit)
+  if (colon < 0) return false;
+  const scheme = s.slice(0, colon).replace(/[\u0000-\u0020]/g, "").toLowerCase();
   if (scheme === "javascript" || scheme === "vbscript") return true;
   if (scheme === "data") {
-    const media = s.split(":", 1)[1].split(",", 1)[0].replace(/[\u0000-\u0020]/g, "").toLowerCase();
+    const media = s.slice(colon + 1).split(",", 1)[0].replace(/[\u0000-\u0020]/g, "").toLowerCase();
     return !$SAFE_DATA_IMAGE.test(media);
   }
   return false;
@@ -67,6 +68,14 @@ function $cssValue(prop, v) {
   return String(v);
 }
 
+// Mirrors vdom.css_declaration_ok: one declaration, nothing that could end it and start another.
+const $CSS_NAME = /^(?:--[^\s;:{}()<>\\'"!,/]+|-?[A-Za-z][A-Za-z0-9-]*)$/u;
+function $cssOk(prop, text) {
+  if (!$CSS_NAME.test(prop) || /[;{}<\\]/.test(text)) return false;
+  const count = (c) => text.split(c).length - 1;
+  return count('"') % 2 === 0 && count("'") % 2 === 0 && count("(") === count(")");
+}
+
 // ---- element and component factories ---------------------------------------------
 
 function $flat(children, out = []) {
@@ -74,7 +83,7 @@ function $flat(children, out = []) {
     if (c === null || c === undefined || c === true || c === false) continue;
     if (c instanceof VNode) out.push(c);
     else if (typeof c === "string") out.push(new VNode($TEXT, c));
-    else if (typeof c === "number") out.push(new VNode($TEXT, String(c)));
+    else if (typeof c === "number") out.push(new VNode($TEXT, $str(c))); // Python's text: 1e+16, inf
     else if (Array.isArray(c) || c instanceof Set) $flat(c, out);
     else out.push(new VNode($TEXT, $str(c)));
   }
@@ -292,7 +301,8 @@ const $ref = $fn(function ref(initial = null) {
 // channels changes as components mount and unmount, so the stream is reopened — batched across a
 // render — whenever it changes, and reconnected with backoff when the connection drops.
 
-const $LIVE = { source: null, handlers: new Map(), retry: 500, syncing: false };
+const $LIVE = { source: null, handlers: new Map(), retry: 500, syncing: false, refused: null };
+const $LIVE_MAX = 20; // mirrors live.MAX_CHANNELS: the server refuses a stream asking for more
 
 function $liveNames() {
   return [...$LIVE.handlers.keys()];
@@ -310,13 +320,51 @@ function $liveSync() {
       $LIVE.source.close();
       $LIVE.source = null;
     }
-    if (want) $liveOpen(want);
+    if (want && want !== $LIVE.refused) $liveOpen(want);
   });
+}
+
+// Why the server refused the stream, when it did: an EventSource error carries no status, so
+// a failed stream is fetched once. A 4xx answer won't change on retry (an undeclared channel,
+// a guard that said no, more than $LIVE_MAX channels), so the runtime stops and says why.
+async function $liveProbe(url) {
+  if (typeof fetch !== "function") return null;
+  const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+  try {
+    const res = await fetch(url, { credentials: "same-origin", signal: ctrl ? ctrl.signal : undefined });
+    if (res.status >= 400 && res.status < 500) {
+      let text = "";
+      try {
+        text = await res.text();
+      } catch (err) {
+        // the status alone is enough
+      }
+      let message = "";
+      try {
+        message = JSON.parse(text).error.message;
+      } catch (err) {
+        const h1 = /<h1>([\s\S]*?)<\/h1>/.exec(text);
+        message = h1 ? h1[1].replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, "&") : "";
+      }
+      return { status: res.status, message };
+    }
+    if (ctrl) ctrl.abort(); // the stream works again: drop the probe's copy
+  } catch (err) {
+    // offline or aborted: keep retrying
+  }
+  return null;
 }
 
 function $liveOpen(want) {
   if (typeof window === "undefined" || !window.EventSource) return;
-  const source = new EventSource("/_jongo/live?channels=" + encodeURIComponent(want));
+  const count = want.split(",").length;
+  if (count > $LIVE_MAX && $BOOT.dev) {
+    console.warn(`[jongo] this page subscribes to ${count} live() channels, but one tab may use at most ${$LIVE_MAX}: ` +
+      "the server will refuse the stream. Subscribe to one channel per list instead of one per row.");
+  }
+  const url = "/_jongo/live?channels=" + encodeURIComponent(want);
+  const source = new EventSource(url);
   source.jchannels = want;
   $LIVE.source = source;
   source.onopen = () => {
@@ -339,15 +387,24 @@ function $liveOpen(want) {
       }
     }
   };
-  source.onerror = () => {
+  source.onerror = async () => {
     source.close();
     if (source.jclosed || $LIVE.source !== source) return;
     $LIVE.source = null;
+    const refused = await $liveProbe(url);
+    if (refused) {
+      $LIVE.refused = want; // until the set of channels changes
+      const err = $b.RuntimeError(`live() updates are off on this page: the server refused the stream ` +
+        `(HTTP ${refused.status})${refused.message ? ": " + refused.message : ""}`);
+      err.code = refused.status === 403 ? "J210" : null;
+      $report(err);
+      return;
+    }
     const wait = $LIVE.retry;
     $LIVE.retry = Math.min(wait * 2, 10000);
     setTimeout(() => {
       const names = $liveNames().join(",");
-      if (!$LIVE.source && names) $liveOpen(names);
+      if (!$LIVE.source && names && names !== $LIVE.refused) $liveOpen(names);
     }, wait);
   };
 }
@@ -493,11 +550,44 @@ function $patchChildren(parent, oldChildren, newChildren, svg, depth) {
     }
   });
   for (const v of oldChildren) if (!used.has(v)) $unmount(v);
+  // Moving a subtree that holds the focused input blurs it (and drops the caret), so a keyed
+  // reorder would steal focus mid-typing. Use moveBefore where the browser has it (it keeps
+  // focus), and otherwise put the focus and selection back afterwards.
+  const active = typeof document !== "undefined" ? document.activeElement : null;
+  const watch = active && active !== document.body && typeof parent.contains === "function" && parent.contains(active);
+  let selection = null;
+  if (watch) {
+    try {
+      selection = [active.selectionStart, active.selectionEnd, active.selectionDirection];
+    } catch (err) {
+      // inputs without a selection (checkboxes...) throw here
+    }
+  }
   let ref = null;
   for (let i = newChildren.length - 1; i >= 0; i--) {
     const node = $domOf(newChildren[i]);
-    if (node.nextSibling !== ref || node.parentNode !== parent) parent.insertBefore(node, ref);
+    if (node.nextSibling !== ref || node.parentNode !== parent) {
+      if (typeof parent.moveBefore === "function" && node.parentNode === parent && node.isConnected) {
+        try {
+          parent.moveBefore(node, ref);
+        } catch (err) {
+          parent.insertBefore(node, ref);
+        }
+      } else {
+        parent.insertBefore(node, ref);
+      }
+    }
     ref = node;
+  }
+  if (watch && active.isConnected && document.activeElement !== active && typeof active.focus === "function") {
+    active.focus({ preventScroll: true });
+    if (selection && selection[0] !== null && selection[0] !== undefined) {
+      try {
+        active.setSelectionRange(selection[0], selection[1], selection[2] || "none");
+      } catch (err) {
+        // not a text control
+      }
+    }
   }
 }
 
@@ -531,13 +621,14 @@ function $setProp(node, k, v, old, svg) {
     else for (const s in old) if (!(s in v)) node.style.removeProperty($cssProp(s));
     for (const s in v) {
       const prop = $cssProp(s);
-      if (v[s] === null || v[s] === undefined || v[s] === false) node.style.removeProperty(prop);
-      else node.style.setProperty(prop, $cssValue(prop, v[s]));
+      const text = v[s] === null || v[s] === undefined || v[s] === false ? null : $cssValue(prop, v[s]);
+      if (text === null || !$cssOk(prop, text)) node.style.removeProperty(prop);
+      else node.style.setProperty(prop, text);
     }
     return;
   }
   if (!svg && k === "value") {
-    const text = v === null || v === undefined ? "" : String(v);
+    const text = v === null || v === undefined ? "" : typeof v === "string" ? v : $str(v);
     if (node.value !== text) node.value = text;
     return;
   }
@@ -553,7 +644,7 @@ function $setProp(node, k, v, old, svg) {
     return;
   }
   if (v === null || v === undefined || v === false) node.removeAttribute(k);
-  else node.setAttribute(k, v === true ? "" : v);
+  else node.setAttribute(k, v === true ? "" : typeof v === "string" ? v : $str(v)); // as the server writes it
 }
 
 function $dispatch(event) {
@@ -634,13 +725,22 @@ function $unescKey(k) {
   return k.startsWith("$$") && /^\$+v$/.test(k) ? k.slice(1) : k;
 }
 
+// {"$v": {"num": "inf"}} is a float JSON can't carry (vdom._non_finite).
+const $NON_FINITE = { inf: Infinity, "-inf": -Infinity, nan: NaN };
+
 function $revive(x) {
   if (Array.isArray(x)) return x.map($revive);
   if (x !== null && typeof x === "object") {
     const keys = Object.keys(x);
-    if (keys.length === 1 && keys[0] === "$v") return $build(x.$v);
+    if (keys.length === 1 && keys[0] === "$v") {
+      const inner = x.$v;
+      if (inner && typeof inner === "object" && Object.keys(inner).length === 1 && $hasOwn($NON_FINITE, inner.num)) {
+        return $NON_FINITE[inner.num];
+      }
+      return $build(inner);
+    }
     const out = {};
-    for (const k of keys) out[$unescKey(k)] = $revive(x[k]);
+    for (const k of keys) $setKey(out, $unescKey(k), $revive(x[k]));
     return out;
   }
   return x;
@@ -698,7 +798,19 @@ async function $load(href, mode) {
 }
 
 const $navigate = $fn(function navigate(url, replace = false) {
-  const target = new URL(url, window.location.href);
+  let target = null;
+  try {
+    target = new URL($str(url), window.location.href);
+  } catch (err) {
+    // an unparseable URL is refused below, like a javascript: one
+  }
+  // Only web pages: a javascript:/data:/vbscript: target (from redirect() of user input, or
+  // navigate(user_value)) would run script in this origin.
+  if (target === null || (target.protocol !== "http:" && target.protocol !== "https:")) {
+    const err = $b.ValueError(`navigate() refused ${$repr($str(url))}: only http and https URLs can be followed`);
+    $report(err);
+    return Promise.resolve(null);
+  }
   if (target.origin !== window.location.origin) {
     window.location.href = target.href;
     return Promise.resolve(null);

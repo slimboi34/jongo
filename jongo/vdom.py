@@ -14,6 +14,7 @@ import decimal
 import functools
 import html as _html
 import inspect
+import logging
 import math
 import re
 import uuid
@@ -146,6 +147,24 @@ def css_value(prop: str, value) -> str:
     return str(value)
 
 
+_CSS_NAME = re.compile(r"""^(?:--[^\s;:{}()<>\\'"!,/]+|-?[A-Za-z][A-Za-z0-9-]*)$""")
+_CSS_FORBIDDEN = frozenset(';{}<\\')
+_dropped_styles: set[str] = set()
+
+
+def css_declaration_ok(prop: str, text: str) -> bool:
+    """Whether ``prop: text`` is one declaration and nothing more.
+
+    A value with ``;``, braces, ``<``, a backslash, or unbalanced quotes or parentheses could
+    end the declaration and start others (``{"color": "red; background: url(...)"}``). The
+    browser's ``style.setProperty`` rejects such values, so the server drops them too and the
+    two render the same. Mirrored in compiler/dom.js ($cssOk).
+    """
+    if not _CSS_NAME.match(prop) or any(c in _CSS_FORBIDDEN for c in text):
+        return False
+    return text.count('"') % 2 == 0 and text.count("'") % 2 == 0 and text.count("(") == text.count(")")
+
+
 def style_text(style) -> str:
     if style is None:
         return ""
@@ -156,7 +175,15 @@ def style_text(style) -> str:
         if value is None or value is False:
             continue
         prop = css_property(key)
-        parts.append(f"{prop}: {css_value(prop, value)}")
+        text = css_value(prop, value)
+        if not css_declaration_ok(prop, text):
+            if prop not in _dropped_styles and len(_dropped_styles) < 256:
+                _dropped_styles.add(prop)
+                logging.getLogger("jongo").info(
+                    "style: dropped %s=%r: a style value can't contain ; { } < or a backslash, or unbalanced "
+                    "quotes or parentheses (the browser refuses it too)", prop, text[:80])
+            continue
+        parts.append(f"{prop}: {text}")
     return "; ".join(parts)
 
 
@@ -533,7 +560,7 @@ def _render_attrs(tag, props, out):
             if not value:
                 continue
         elif type(value) is dict and len(value) == 1 and "$v" in value:
-            value = build(value["$v"])   # an embedded node arriving from serialised data
+            value = _revive_wrapped(value["$v"])   # an embedded node (or inf/nan) from serialised data
         if value is True:
             out.append(" " + name)
             continue
@@ -605,17 +632,30 @@ def _prop_key(name: str):
     return key
 
 
-def to_json_data(value, where: str = "value"):
-    """Convert ``value`` to plain JSON data the browser can receive."""
+def _non_finite(value: float, browser: bool):
+    """NaN/Infinity aren't valid JSON. Plain JSON (APIs, broadcasts) gets null; data for the
+    browser runtime gets the ``{"$v": {"num": "inf"}}`` wrapper, which dom.js and
+    :func:`revive` turn back into the float, so a prop of ``float("inf")`` stays infinite."""
+    if not browser:
+        return None
+    return {"$v": {"num": "nan" if value != value else ("inf" if value > 0 else "-inf")}}
+
+
+def to_json_data(value, where: str = "value", *, browser: bool = False):
+    """Convert ``value`` to plain JSON data the browser can receive.
+
+    ``browser=True`` (props and bundle constants, read by the browser runtime) keeps
+    non-finite floats as a wrapped value instead of ``None``.
+    """
     kind = type(value)                       # exact-type fast path for the common scalars
     if kind is str or kind is int or kind is bool or value is None:
         return value
     if kind is float:
-        return value if math.isfinite(value) else None
+        return value if math.isfinite(value) else _non_finite(value, browser)
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, float):
-        return value if math.isfinite(value) else None  # NaN/Infinity aren't valid JSON
+        return value if math.isfinite(value) else _non_finite(value, browser)
     if isinstance(value, (int, str)):
         return value
     if isinstance(value, VNode):
@@ -626,22 +666,22 @@ def to_json_data(value, where: str = "value"):
             key = _escape_key(str(k))
             if key in out:  # distinct keys must not silently collide as JSON strings
                 raise JongoError(f"{where}: dict keys collide as the JSON string {key!r}", code="J111")
-            out[key] = to_json_data(v, f"{where}[{k!r}]")
+            out[key] = to_json_data(v, f"{where}[{k!r}]", browser=browser)
         return out
     if isinstance(value, (list, tuple, set, frozenset)):
-        return [to_json_data(v, f"{where}[{i}]") for i, v in enumerate(value)]
+        return [to_json_data(v, f"{where}[{i}]", browser=browser) for i, v in enumerate(value)]
     if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
         return value.isoformat()
     if isinstance(value, decimal.Decimal):
-        return float(value) if value.is_finite() else None  # NaN/Infinity aren't valid JSON
+        return float(value) if value.is_finite() else _non_finite(float(value), browser)
     if isinstance(value, uuid.UUID):
         return str(value)
     if hasattr(value, "to_dict") and callable(value.to_dict):
-        return to_json_data(value.to_dict(), where)
+        return to_json_data(value.to_dict(), where, browser=browser)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return to_json_data(dataclasses.asdict(value), where)
+        return to_json_data(dataclasses.asdict(value), where, browser=browser)
     if isinstance(value, State):
-        return to_json_data(value.value, where)
+        return to_json_data(value.value, where, browser=browser)
     if callable(value):
         raise JongoError(
             f"{where} is a function ({getattr(value, '__name__', value)!r}). Functions can't be sent to the "
@@ -649,7 +689,7 @@ def to_json_data(value, where: str = "value"):
             code="J111",
         )
     if hasattr(value, "__iter__") and not isinstance(value, (bytes, bytearray)):
-        return [to_json_data(v, f"{where}[{i}]") for i, v in enumerate(value)]
+        return [to_json_data(v, f"{where}[{i}]", browser=browser) for i, v in enumerate(value)]
     raise JongoError(f"{where} ({type(value).__name__}) can't be sent to the browser; convert it to dict/list/str",
                      code="J111")
 
@@ -662,7 +702,7 @@ def serialize(node):
     if not isinstance(node, VNode):
         raise JongoError(f"can't render {type(node).__name__} as UI", code="J112")
     if isinstance(node.type, Component):
-        data = {"C": node.type.id, "p": to_json_data(node.props, f"<{node.type.name}> props")}
+        data = {"C": node.type.id, "p": to_json_data(node.props, f"<{node.type.name}> props", browser=True)}
     else:
         props = {}
         for name, value in node.props.items():
@@ -676,7 +716,7 @@ def serialize(node):
                     code="J112",
                 )
             try:
-                props[key] = to_json_data(value)
+                props[key] = to_json_data(value, browser=True)
             except JongoError as exc:   # the context costs an f-string per prop if built up front
                 raise JongoError(f"<{node.type}> {name}: {exc}", code=exc.code, hint=exc.hint) from None
         data = {"t": node.type, "p": props}
@@ -701,10 +741,17 @@ def build(data):
     return VNode(data["t"], props, children, data.get("k"))
 
 
+def _revive_wrapped(inner):
+    """The content of a ``{"$v": ...}`` wrapper: a serialised node, or a non-finite float."""
+    if isinstance(inner, dict) and len(inner) == 1 and "num" in inner:
+        return float(inner["num"])
+    return build(inner)
+
+
 def revive(value):
     if isinstance(value, dict):
         if len(value) == 1 and "$v" in value:
-            return build(value["$v"])
+            return _revive_wrapped(value["$v"])
         return AttrDict({_unescape_key(k): revive(v) for k, v in value.items()})
     if isinstance(value, list):
         return [revive(v) for v in value]
