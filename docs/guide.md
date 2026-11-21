@@ -1021,7 +1021,7 @@ code is never reused. `jongo explain CODE` has the explanation and an example fo
 | `J211` | Query parameter has the wrong type | Fix the link or form that builds the URL, or give the parameter a type that accepts the value (str, Optional[int]) and handle it in the function. |
 | `J212` | Malformed request body | Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for larger uploads raise jongo.Request.max_body_size (16 MB by default), for bigger forms Request.max_form_fields / max_form_parts. |
 | `J213` | Too many requests (rate limit) | Wait for the Retry-After seconds. If the limit is too tight, raise it where it is set (rate_limit="30/minute", or jongo.auth.LOGIN_ATTEMPTS / LOGIN_WINDOW for sign-in). |
-| `J214` | Host not allowed | Open the app as http://localhost:PORT or by IP address, or list the name it is reached by (a tunnel, a .local name): Jongo(__name__, allowed_hosts=["myapp.example.com"]); ".example.com" also allows its subdomains. |
+| `J214` | Host not allowed | Open the app as localhost or 127.0.0.1, or list the host: Jongo(__name__, allowed_hosts=["myapp.test"]) (a leading dot, ".example.com", also allows subdomains). |
 
 **Database, models and migrations**
 

@@ -363,16 +363,11 @@ CATALOGUE: dict[str, dict] = {
     ),
     "J214": _e(
         "Host not allowed",
-        "The request's Host header names a host the app doesn't answer for. Under `jongo dev` the app "
-        "answers requests addressed to localhost, a *.localhost name or an IP address, plus the names in "
-        "Jongo(allowed_hosts=[...]); any other name is refused, so a web page you visit can't reach the "
-        "dev server through a domain it controls (DNS rebinding) and read the debug pages, the status "
-        "endpoint or call your server functions. In production the check applies only when "
-        "allowed_hosts is set.",
-        "Open the app as http://localhost:PORT or by IP address, or list the name it is reached by "
-        "(a tunnel, a .local name): Jongo(__name__, allowed_hosts=[\"myapp.example.com\"]); "
-        "\".example.com\" also allows its subdomains.",
-        "app = Jongo(__name__, allowed_hosts=[\"myapp.example.com\"])\n# Host: other.example -> 400 J214",
+        "The request's Host header names a host the app doesn't answer to. Under `jongo dev` the app answers "
+        "localhost, *.localhost and IP addresses only, so a web page can't reach the dev server by DNS rebinding "
+        "(its own domain, pointed at 127.0.0.1); in production the check applies when Jongo(allowed_hosts=...) is set.",
+        "Open the app as localhost or 127.0.0.1, or list the host: Jongo(__name__, allowed_hosts=[\"myapp.test\"]) "
+        "(a leading dot, \".example.com\", also allows subdomains).",
     ),
     # -- J3xx database ------------------------------------------------------------------------
     "J300": _e(
