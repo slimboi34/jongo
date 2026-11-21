@@ -562,10 +562,27 @@ class _TablePlanner:
                 f"INSERT INTO {quote(temp)} ({', '.join(map(quote, targets))}) "
                 f"SELECT {', '.join(sources)} FROM {quote(self.table)}"
             )
+        if any(column.pk for column in new_columns):  # the new table is AUTOINCREMENT
+            sql.extend(self._carry_sequence(temp))
         sql.append(f"DROP TABLE {quote(self.table)}")
         sql.append(f"ALTER TABLE {quote(temp)} RENAME TO {quote(self.table)}")
         sql.extend(self._indexes_after_rebuild({column.name.lower() for column in new_columns}))
         return sql
+
+    def _carry_sequence(self, temp: str) -> list[str]:
+        """Keep the AUTOINCREMENT high-water mark across the rebuild.
+
+        DROP TABLE deletes the old table's ``sqlite_sequence`` row and the new table's is
+        seeded from MAX(id) of the rows copied, so ids of deleted rows above that would be
+        handed out again. Give the new table the larger of the two (RENAME carries it over).
+        """
+        old, new = sql_literal(self.live.name), sql_literal(temp)
+        highest = f"(SELECT MAX(seq) FROM sqlite_sequence WHERE name = {old})"
+        return [
+            f"UPDATE sqlite_sequence SET seq = MAX(seq, COALESCE({highest}, 0)) WHERE name = {new}",
+            f"INSERT INTO sqlite_sequence (name, seq) SELECT {new}, {highest} "
+            f"WHERE {highest} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = {new})",
+        ]
 
     def _indexes_after_rebuild(self, column_names: set[str]) -> list[str]:
         desired = model_indexes(self.model)

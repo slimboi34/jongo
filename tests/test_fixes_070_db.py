@@ -446,3 +446,83 @@ def test_float_field_reports_ints_too_large_for_a_float():
     with pytest.raises(db.ValidationError, match="finite number"):
         Measure.filter(x=10**400).count()
     assert Measure.create(x=2**70).x == float(2**70)
+
+
+# ------------------------------------- a SQLite table rebuild keeps the AUTOINCREMENT mark ---
+
+
+def _sequence(table: str):
+    row = connection.get_connection().execute("SELECT seq FROM sqlite_sequence WHERE name = ?", (table,)).fetchall()
+    return [r[0] for r in row]
+
+
+@sqlite_only
+def test_rebuild_does_not_reissue_ids_of_deleted_rows():
+    class Doc(db.Model):
+        title = db.Text()
+        n = db.Int(null=True)
+
+    db.migrate()
+    for i in range(10):
+        Doc.create(title=str(i))
+    Doc.filter(id__gt=7).delete()
+    assert _sequence("doc") == [10]
+
+    class Doc(db.Model):  # noqa: F811 -- null -> NOT NULL: a rebuild on SQLite
+        title = db.Text()
+        n = db.Int(default=0)
+
+    results = db.migrate()
+    assert [(op.kind, applied) for op, applied in results] == [("rebuild_table", True)]
+    assert _sequence("doc") == [10]
+    assert Doc.create(title="new").pk == 11
+    assert db.plan_migrations() == []
+
+
+@sqlite_only
+def test_drop_column_rebuild_keeps_the_sequence_too():
+    class Owner(db.Model):
+        name = db.Text()
+
+    class Doc(db.Model):
+        title = db.Text()
+        owner = db.ForeignKey(Owner, null=True)  # a referencing column can't be dropped in place
+
+    db.migrate()
+    for i in range(5):
+        Doc.create(title=str(i))
+    Doc.all().delete()  # an empty table: nothing copied, so the new table would start at 1
+
+    class Doc(db.Model):  # noqa: F811
+        title = db.Text()
+
+    results = db.migrate(allow_destructive=True)
+    assert [(op.kind, op.rebuild, applied) for op, applied in results] == [("drop_column", True, True)]
+    assert _sequence("doc") == [5]
+    assert Doc.create(title="new").pk == 6
+
+
+@sqlite_only
+def test_rebuild_of_a_table_that_never_had_a_row_or_autoincrement():
+    db.execute('CREATE TABLE "legacy" ("id" INTEGER PRIMARY KEY, "title" TEXT)')  # no AUTOINCREMENT
+    db.execute('INSERT INTO "legacy" ("title") VALUES (\'a\'), (\'b\'), (\'c\')')
+    db.execute('DELETE FROM "legacy" WHERE "id" = 3')
+
+    class Legacy(db.Model):
+        title = db.Text(default="")
+
+    db.migrate()  # title becomes NOT NULL: a rebuild
+    assert _sequence("legacy") == [2]  # nothing to carry over: seeded from the rows copied
+    assert Legacy.create(title="d").pk == 3
+
+    class Empty(db.Model):
+        title = db.Text(null=True)
+
+    db.migrate()
+
+    class Empty(db.Model):  # noqa: F811
+        title = db.Text(default="")
+
+    db.migrate()
+    assert _sequence("empty") in ([], [0])  # SQLite writes 0 for an empty INSERT ... SELECT
+    assert Empty.create(title="first").pk == 1
