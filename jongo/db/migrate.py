@@ -13,7 +13,7 @@ from . import connection
 from .fields import DateTime, Field, ForeignKey, utcnow
 from .models import Model, models_registry
 from .query import quote
-from ..errors import Diagnostic
+from ..errors import Diagnostic, hint_for
 
 ZERO_VALUES = {"text": "''", "int": "0", "float": "0.0", "bool": "0", "datetime": "''", "date": "''", "json": "'null'"}
 
@@ -110,7 +110,12 @@ def model_columns(model: type[Model]) -> list[Column]:
             try:
                 target = field.related_model
             except LookupError as exc:
-                raise MigrationError(str(exc)) from None
+                # Still a MigrationError for callers that catch one, but it keeps the lookup's
+                # J310 and hint: "null=True or a default" (J303's advice) can't fix a missing model.
+                error = MigrationError(str(exc))
+                error.code = getattr(exc, "code", None) or "J310"
+                error.hint = getattr(exc, "hint", None) or hint_for(error.code)
+                raise error from None
             references = (target._meta.table, "id", field.on_delete)
         columns.append(Column(field.column, field.sql_type, notnull=not field.null, references=references))
     return columns

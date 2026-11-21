@@ -62,3 +62,36 @@ def test_on_delete_no_action_is_accepted_and_migrates_once():
 def test_on_delete_still_rejects_unknown_actions():
     with pytest.raises(ValueError, match="NO ACTION"):
         db.ForeignKey("Anything", on_delete="SET DEFAULT")
+
+
+# ------------------------------------------ ForeignKey to an undefined model keeps J310 ---
+
+
+def test_foreign_key_to_an_undefined_model_is_j310_not_j303():
+    from jongo.errors import classify
+
+    class Review(db.Model):
+        body = db.Text()
+        owner = db.ForeignKey("Nope")
+
+    with pytest.raises(db.MigrationError) as caught:  # still a MigrationError for existing except clauses
+        db.plan_migrations()
+    assert caught.value.code == "J310"
+    assert 'points to model "Nope"' in str(caught.value)
+    code, hint = classify(caught.value)
+    assert code == "J310" and "null=True" not in hint and "define (import)" in hint
+
+
+def test_jongo_check_reports_j310_for_a_foreign_key_to_an_undefined_model():
+    from jongo import Jongo
+    from jongo.introspect import check
+
+    app = Jongo(__name__, database=":memory:")
+
+    class Review(db.Model):
+        body = db.Text()
+        owner = db.ForeignKey("Nope")
+
+    problems = [p for p in check(app)["problems"] if p["kind"] == "migrations"]
+    assert [p["code"] for p in problems] == ["J310"]
+    assert "Nope" in problems[0]["message"] and "null=True" not in problems[0]["hint"]
