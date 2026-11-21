@@ -163,7 +163,7 @@ class Jongo:
             ``database`` path, ``.jongo/secret`` and ``static/`` live. If it isn't the name of
             an imported module, the directory of the file that created the app is used.
         allowed_hosts: the ``Host`` names the app answers to, e.g. ``["example.com",
-            ".example.com"]`` (a leading dot also allows subdomains; ``"*"`` allows any).
+            ".example.com"]`` (a leading dot or ``*.`` also allows subdomains; ``"*"`` allows any).
             Under ``jongo dev`` the app always answers ``localhost``, ``*.localhost`` and IP
             addresses, and refuses other names with a 400 (``J214``) unless they are listed
             here, so a web page can't reach the dev server by DNS rebinding. In production the

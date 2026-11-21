@@ -59,8 +59,9 @@ def _hostname(host: str) -> str:
 def host_allowed(host: str, allowed=(), *, dev: bool = False) -> bool:
     """Whether a request's ``Host`` header names this app (see ``Jongo(allowed_hosts=...)``).
 
-    ``allowed`` holds host names (``"example.com"``), ``".example.com"`` for that domain and
-    every subdomain, or ``"*"`` for anything. With ``dev=True`` this machine's names are
+    ``allowed`` holds host names (``"example.com"``), ``".example.com"`` (or
+    ``"*.example.com"``) for that domain and every subdomain, or ``"*"`` for anything. A port
+    in an entry is ignored. With ``dev=True`` this machine's names are
     allowed too: ``localhost``, ``*.localhost``, and any IP address (a DNS-rebinding page
     always names its own domain, never an IP address).
     """
@@ -69,6 +70,8 @@ def host_allowed(host: str, allowed=(), *, dev: bool = False) -> bool:
         return False
     for pattern in allowed:
         pattern = _hostname(str(pattern)).rstrip(".")
+        if pattern.startswith("*."):
+            pattern = pattern[1:]
         if pattern == "*":
             return True
         if pattern.startswith(".") and len(pattern) > 1:

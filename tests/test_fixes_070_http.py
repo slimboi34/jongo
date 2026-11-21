@@ -479,6 +479,8 @@ def test_host_allowed_parsing():
     assert not host_allowed("localhost:80@evil.example", dev=True)
     assert not host_allowed("", dev=True) and not host_allowed("evil.example", dev=True)
     assert host_allowed("Shop.Example:443", ["shop.example"])
+    assert host_allowed("a.shop.example", ["*.shop.example"]) and host_allowed("shop.example", ["*.shop.example"])
+    assert not host_allowed("evilshop.example", ["*.shop.example", ".shop.example"])
 
 
 def test_mcp_get_still_works_in_dev():
