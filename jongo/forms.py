@@ -172,6 +172,10 @@ def portable_pattern(pattern: str) -> str:
             continue
         if ch == "]" and in_class:
             in_class = False
+        elif ch == "]":
+            out.append("\\]")  # a lone ] is a literal in Python, a syntax error in JavaScript's u-mode
+            i += 1
+            continue
         elif ch in "{}" and not in_class:
             quantifier = _BRACE_QUANTIFIER.match(pattern, i) if ch == "{" else None
             if quantifier is None:
@@ -685,6 +689,8 @@ def _convert(rule: dict, value):
     if kind == "float":
         return float(value.strip()) if isinstance(value, str) else float(value)
     if kind == "choice":
+        if isinstance(value, float) and value % 1 == 0 and -_MAX_SAFE <= value <= _MAX_SAFE:
+            value = int(value)  # as check(): 2.0 is the choice 2
         for choice in rule["choices"]:
             if str(choice) == str(value).strip():
                 return choice
@@ -771,7 +777,13 @@ def check(rule, value, values=None):
     if kind == "choice":
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return messages["choices"]
-        wanted = value.strip() if isinstance(value, str) else str(value)
+        if isinstance(value, str):
+            wanted = value.strip()
+        elif value % 1 == 0 and -_MAX_SAFE <= value <= _MAX_SAFE:
+            # 2.0 is the choice 2: the browser has one number type, so it can't tell them apart
+            wanted = str(int(value))
+        else:
+            wanted = str(value)
         for choice in rule["choices"]:
             if str(choice) == wanted:
                 return ""

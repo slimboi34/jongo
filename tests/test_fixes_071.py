@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from jongo import db
+from jongo import db, forms
 from jongo.db import connection
 from jongo.db.dialect import translate
 from jongo.http import Request
@@ -236,3 +236,28 @@ def test_inlined_literals_beside_bound_floats_translate_for_postgres():
     # %s paramstyle: ? inside a literal is text, % inside it is doubled, and each ? is a %s.
     sql = '"tag" IN (\'50%\', \'a?b\', ?)'
     assert translate(sql, True, "%s") == '"tag" IN (\'50%%\', \'a?b\', %s)'
+
+
+# --------------------------------------------------------------------- forms --
+
+
+@pytest.mark.parametrize("pattern,portable", [
+    (r"[A-Z]+]", r"[A-Z]+\]"),
+    (r"a]", r"a\]"),
+    (r"(a|b])", r"(a|b\])"),
+    (r"[]a]", r"[\]a]"),      # a leading ] in a class was already escaped
+    (r"\]", r"\]"),
+])
+def test_portable_pattern_escapes_a_lone_closing_bracket(pattern, portable):
+    assert forms.portable_pattern(pattern) == portable
+
+
+def test_choice_reads_an_integral_float_as_its_int():
+    rule = forms.Schema("S", c=forms.Choice([2, "a", 0]))["c"]
+    for value in (2, 2.0, "2", " 2 ", 0, -0.0, 0.0):
+        assert forms.check(rule, value) == "", value
+    for value in (2.5, "2.0", 3, float("inf"), float("nan"), True):
+        assert forms.check(rule, value) == rule["messages"]["choices"], value
+    schema = forms.Schema("S", level=forms.Choice([(1, "Low"), (2, "High")]))
+    assert forms.validate(schema, {"level": 2.0}) == {}
+    assert schema.clean({"level": 2.0}) == {"level": 2}
