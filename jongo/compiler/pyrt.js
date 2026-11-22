@@ -1317,7 +1317,8 @@ Object.assign($b, {
   repr: $repr,
   chr(n) {
     n = $intArg(n);
-    if (n > 2147483647 || n < -2147483648) throw $b.OverflowError("Python int too large to convert to C int");
+    // CPython 3.13+ raises ValueError for every out-of-range int; 3.10-3.12 raised OverflowError
+    // past the C int range. The browser follows 3.13+.
     if (n < 0 || n > 0x10ffff) throw $b.ValueError("chr() arg not in range(0x110000)");
     return String.fromCodePoint(n);
   },

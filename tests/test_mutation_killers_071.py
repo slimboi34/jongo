@@ -43,7 +43,7 @@ def test_literal_zero_divisor_and_negative_power_match_cpython(expr, expected, t
     script = ('(function(){"use strict";\n' + runtime_source() + "\n" + units
               + f"\ntry {{ console.log(JSON.stringify({{ok: $repr({name}())}})); }} "
               + "catch (e) { console.log(JSON.stringify({err: String(e && e.name)})); }\n})();")
-    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run([NODE, "-"], input=script, capture_output=True, text=True, timeout=60)
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     assert out == ({"err": expected} if expected == "ZeroDivisionError" else {"ok": expected}), (expr, out)
 

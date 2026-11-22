@@ -293,7 +293,7 @@ def test_choice_reads_an_integral_float_as_its_int():
 def s_builtin_errors_are_pythons():
     """Which except clause catches each failure: the browser must raise the same type."""
     out = []
-    for f in (lambda: chr(-1), lambda: chr(0x110000), lambda: chr(2 ** 31), lambda: chr(1.5),
+    for f in (lambda: chr(-1), lambda: chr(0x110000), lambda: chr(1.5),
               lambda: ord("ab"), lambda: ord(""), lambda: ord(5),
               lambda: abs("a"), lambda: abs([1, 2]), lambda: abs(None),
               lambda: 8 >> -1, lambda: 8 << -1, lambda: round(float("inf")), lambda: round(float("-inf")),
@@ -372,6 +372,26 @@ def test_builtins_match_cpython(tmp_path):
     results = run_in_node(SAMPLES, tmp_path)
     for name, fn in SAMPLES.items():
         assert results[name].get("ok") == normalise(fn()), (name, results[name])
+
+
+def chr_past_the_c_int_range():
+    out = []
+    for n in (2 ** 31, -(2 ** 31) - 1):
+        try:
+            chr(n)
+            out.append("no error")
+        except ValueError:
+            out.append("ValueError")
+        except OverflowError:
+            out.append("OverflowError")
+    return out
+
+
+@needs_node
+def test_chr_past_the_c_int_range_follows_python_3_13(tmp_path):
+    # CPython changed here: 3.10-3.12 raise OverflowError, 3.13+ ValueError. The browser follows 3.13+.
+    results = run_in_node({"chr_past_the_c_int_range": chr_past_the_c_int_range}, tmp_path)
+    assert results["chr_past_the_c_int_range"].get("ok") == ["ValueError", "ValueError"], results
 
 
 def literal_str_method():

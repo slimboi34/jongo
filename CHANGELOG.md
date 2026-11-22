@@ -75,6 +75,8 @@ a header with more than 64 parameters, is a 400.
 
 ### Known limits
 
+- `chr()` past the C int range raises `ValueError` in the browser, as CPython 3.13+ does;
+  3.10–3.12 raise `OverflowError` there.
 - A dict changed inside a loop over it doesn't raise `RuntimeError` in the browser: the loop
   runs over the keys it began with (guide §18). A guard made every dict loop 1.7 to 4.5 times
   slower and would still miss `.items()`, `.keys()` and `.values()`, which return lists.

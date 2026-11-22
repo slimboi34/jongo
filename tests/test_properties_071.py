@@ -33,7 +33,8 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 
 def _node(script: str) -> list:
-    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=120)
+    # The script goes in on stdin: as an argument it can pass Linux's 128 KB per-argument limit.
+    proc = subprocess.run([NODE, "-"], input=script, capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
@@ -101,7 +102,8 @@ ERROR_PARITY = [
     "round(2.5, ndigits=1)", "round(2.675, ndigits=2)", "round(15, ndigits=-1)", "round(2.5, ndigits=None)",
     "round(float('inf'))", "round(float('-inf'))", "round(float('nan'))", "round(float('inf'), 1)",
     "round(float('nan'), 0)", "round('a')", "round(None)", "round(1.5, 'a')",
-    "chr(-1)", "chr(0x110000)", "chr(2 ** 31)", "chr(-(2 ** 31) - 1)", "chr(1.5)", "chr('a')", "chr(65)", "chr(True)",
+    # chr() past the C int range is version-dependent in CPython (test_fixes_071 pins the browser to 3.13+).
+    "chr(-1)", "chr(0x110000)", "chr(1.5)", "chr('a')", "chr(65)", "chr(True)",
     "'a\\tb'.expandtabs()", "'a\\tb\\ncd\\te'.expandtabs(4)", "'\\tx'.expandtabs(tabsize=0)",
     "'ab\\t'.expandtabs(True)", "'x\\ty'.expandtabs(2.5)",
 ]
