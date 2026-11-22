@@ -45,7 +45,7 @@ RUNTIME_METHODS = {
     "str": frozenset("""upper lower strip lstrip rstrip split rsplit partition rpartition removeprefix
         removesuffix splitlines join startswith endswith replace find rfind index rindex count title capitalize
         swapcase casefold isdigit isdecimal isnumeric isalpha isalnum isspace isupper islower format zfill ljust
-        rjust center""".split()),
+        rjust center expandtabs""".split()),
     "list": frozenset("append extend insert pop remove index count sort reverse copy clear".split()),
     "dict": frozenset("get keys values items pop update setdefault copy clear".split()),
     "set": frozenset("""add discard remove union intersection difference symmetric_difference issubset
@@ -85,6 +85,14 @@ def _is_num(node) -> bool:
         and isinstance(node.value, (int, float))
         and not isinstance(node.value, bool)
     )
+
+
+#: Expressions whose type is certain from their syntax: a method missing from RUNTIME_METHODS
+#: for one is a compile error (a str constant counts too: see _literal_receiver).
+_LITERAL_KINDS = {
+    ast.JoinedStr: "str", ast.List: "list", ast.ListComp: "list", ast.Dict: "dict", ast.DictComp: "dict",
+    ast.Set: "set", ast.SetComp: "set", ast.Tuple: "tuple",
+}
 
 
 def _is_literal(node) -> bool:
@@ -609,6 +617,17 @@ class FunctionTranspiler:
                              "available in browser code", "compute it in Python and pass it in, or use a "
                              "builtin such as int(), round() or abs()", "J104")
 
+    def _literal_receiver(self, node):
+        """``"x".encode()`` / ``[1, 2].sum()``: a method of a str, list, dict, set or
+        tuple written as a literal, that pyrt.js doesn't have. The type is certain here, so say
+        so now rather than raise AttributeError in someone's browser."""
+        kind = _LITERAL_KINDS.get(type(node.value))
+        if kind is None and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            kind = "str"
+        if kind is not None and node.attr not in RUNTIME_METHODS[kind]:
+            self.error(node, f"{kind}.{node.attr} isn't available in browser code", code="J103",
+                       hint="do this in a @server function, or compute it in Python and pass the result in")
+
     def _builtin_method(self, node):
         """``str.lower`` / ``dict.get``: a builtin type's method, used as a function."""
         value = node.value
@@ -628,6 +647,7 @@ class FunctionTranspiler:
         if found:
             return js
         self._numeric_receiver(node)
+        self._literal_receiver(node)
         unbound = self._builtin_method(node)
         if unbound:
             return unbound
@@ -646,7 +666,7 @@ class FunctionTranspiler:
         if not node.keywords:
             return args, None
         items = [
-            f"...{self.expr(k.value)}" if k.arg is None else f"{js_string(k.arg)}: {self.expr(k.value)}"
+            f"...$mapping({self.expr(k.value)}, true)" if k.arg is None else f"{js_string(k.arg)}: {self.expr(k.value)}"
             for k in node.keywords
         ]
         return args, "{" + ", ".join(items) + "}"
@@ -697,6 +717,7 @@ class FunctionTranspiler:
         args, kw = self.call_args(node)
         if isinstance(func, ast.Attribute) and not self._module_member(func)[0] and not self._builtin_method(func):
             self._numeric_receiver(func)
+            self._literal_receiver(func)
             obj = self.expr(func.value)
             tail = f", {kw}" if kw else ""
             return f"$m({obj}, {js_string(func.attr)}, [{', '.join(args)}]{tail})"
@@ -710,7 +731,9 @@ class FunctionTranspiler:
         if kind is ast.Add:
             if inplace:
                 return f"$iadd({left}, {right})"
-            if _is_str(left_node) or _is_str(right_node) or (_is_num(left_node) and _is_num(right_node)):
+            # A bare + only when both sides are certainly strings, or both numbers: "a" + 1 or
+            # "a" + None must raise TypeError, not concatenate.
+            if (_is_str(left_node) and _is_str(right_node)) or (_is_num(left_node) and _is_num(right_node)):
                 return f"({left} + {right})"
             return f"$add({left}, {right})"
         if kind is ast.Mult and not inplace:
@@ -728,9 +751,9 @@ class FunctionTranspiler:
                 return f"({left} / {right})"
             return f"$div({left}, {right})"
         if kind is ast.Pow:
-            if _is_num(right_node) and right_node.value >= 0:
+            if _is_num(left_node) and _is_num(right_node) and right_node.value >= 0:
                 return f"({left} ** {right})"
-            return f"$pow({left}, {right})"  # 0 ** -1 raises ZeroDivisionError
+            return f"$pow({left}, {right})"  # 0 ** -1 raises ZeroDivisionError, "a" ** 2 TypeError
         if inplace:
             # x *= 2, s |= other...: mutate a list/set/dict in place, as Python does
             mutating = {ast.Mult: "$imul", ast.BitOr: "$ior", ast.Sub: "$isub", ast.BitAnd: "$iand",
@@ -754,8 +777,9 @@ class FunctionTranspiler:
             return f"!{self.test(node.operand)}"
         if isinstance(node.op, ast.Invert):
             return f"$invert({self.expr(node.operand)})"  # BigInt-backed, not JavaScript's 32-bit ~
-        symbol = {ast.USub: "-", ast.UAdd: "+"}[type(node.op)]
-        return f"({symbol}{self.expr(node.operand)})"
+        if _is_num(node.operand):  # -5: a number literal, so no check is needed
+            return f"({'-' if isinstance(node.op, ast.USub) else '+'}{self.expr(node.operand)})"
+        return f"{'$neg' if isinstance(node.op, ast.USub) else '$pos'}({self.expr(node.operand)})"  # -"a" raises
 
     def x_BoolOp(self, node):
         helper = "$and" if isinstance(node.op, ast.And) else "$or"
@@ -836,7 +860,7 @@ class FunctionTranspiler:
         items = []
         for key, value in zip(node.keys, node.values):
             if key is None:
-                items.append(f"...{self.expr(value)}")
+                items.append(f"...$mapping({self.expr(value)}, false)")
             elif isinstance(key, ast.Constant) and isinstance(key.value, str):
                 # a literal "__proto__": key would set the prototype; a computed key doesn't
                 name = f"[{js_string(key.value)}]" if key.value == "__proto__" else js_string(key.value)

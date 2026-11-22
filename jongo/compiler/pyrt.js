@@ -290,14 +290,18 @@ function $in(x, c) {
   throw $b.TypeError(`argument of type '${$typename(c)}' is not iterable`);
 }
 
+const $isNum = (x) => typeof x === "number" || typeof x === "boolean";
+
+// Python's +, -, *: numbers with numbers, and the sequence cases; anything else is the
+// TypeError Python raises, never JavaScript's coercion ("1,2" + 3, "a" - 1 is NaN).
 function $add(a, b) {
-  if (Array.isArray(a) && Array.isArray(b)) {
-    if ($isTup(a) !== $isTup(b)) {
-      throw $b.TypeError(`can only concatenate ${$typename(a)} (not "${$typename(b)}") to ${$typename(a)}`);
-    }
-    return $isTup(a) ? $tup(a.concat(b)) : a.concat(b);
+  if ($isNum(a) && $isNum(b)) return a + b;
+  if (typeof a === "string" && typeof b === "string") return a + b;
+  if (Array.isArray(a) && Array.isArray(b) && $isTup(a) === $isTup(b)) return $isTup(a) ? $tup(a.concat(b)) : a.concat(b);
+  if (typeof a === "string" || Array.isArray(a)) {
+    throw $b.TypeError(`can only concatenate ${$typename(a)} (not "${$typename(b)}") to ${$typename(a)}`);
   }
-  return a + b;
+  throw $b.TypeError(`unsupported operand type(s) for +: '${$typename(a)}' and '${$typename(b)}'`);
 }
 
 function $iadd(a, b) {
@@ -310,16 +314,21 @@ function $iadd(a, b) {
 }
 
 function $mul(a, b) {
+  const [a0, b0] = [a, b];
   if (typeof a === "boolean") a = +a; // Python: True*[1]==[1], False*[1]==[]
   if (typeof b === "boolean") b = +b;
-  if (typeof a === "number" && typeof b !== "number") [a, b] = [b, a];
-  if (typeof a === "string") return b > 0 ? a.repeat(b) : "";
-  if (Array.isArray(a)) {
+  if (typeof a === "number" && typeof b === "number") return a * b;
+  if (typeof a === "number") [a, b] = [b, a];
+  if (typeof a === "string" || Array.isArray(a)) {
+    if (typeof b !== "number" || !Number.isInteger(b)) {
+      throw $b.TypeError(`can't multiply sequence by non-int of type '${$typename(typeof a0 === "number" || typeof a0 === "boolean" ? a0 : b0)}'`);
+    }
+    if (typeof a === "string") return b > 0 ? a.repeat(b) : "";
     const out = [];
     for (let i = 0; i < b; i++) out.push(...a);
     return $isTup(a) ? $tup(out) : out;
   }
-  return a * b;
+  throw $b.TypeError(`unsupported operand type(s) for *: '${$typename(a0)}' and '${$typename(b0)}'`);
 }
 
 // The in-place operators mutate a list, set or dict on the left (every alias sees it), as
@@ -373,6 +382,22 @@ function $ixor(a, b) {
     return a;
   }
   return $bxor(a, b);
+}
+
+function $neg(x) {
+  if (typeof x === "number" || typeof x === "boolean") return -x;
+  throw $b.TypeError(`bad operand type for unary -: '${$typename(x)}'`);
+}
+
+function $pos(x) {
+  if (typeof x === "number" || typeof x === "boolean") return +x;
+  throw $b.TypeError(`bad operand type for unary +: '${$typename(x)}'`);
+}
+
+// ** in a call or a dict display takes a mapping (a dict here), never a list or a string.
+function $mapping(x, call) {
+  if ($isPlain(x)) return x;
+  throw $b.TypeError(call ? `argument after ** must be a mapping, not ${$typename(x)}` : `'${$typename(x)}' object is not a mapping`);
 }
 
 function $num(x, op, other) {
@@ -449,8 +474,9 @@ function $bor(a, b) {
 }
 
 function $sub(a, b) {
+  if ($isNum(a) && $isNum(b)) return a - b;
   if (a instanceof Set && b instanceof Set) return new $PySet([...a].filter((x) => !b.has(x)));
-  return a - b;
+  throw $b.TypeError(`unsupported operand type(s) for -: '${$typename(a)}' and '${$typename(b)}'`);
 }
 
 function $band(a, b) {
@@ -465,12 +491,28 @@ function $bxor(a, b) {
   return Number($bigint(a, "^") ^ $bigint(b, "^"));
 }
 
+// A BigInt shift by a negative count shifts the other way; Python refuses it.
+function $shiftCount(b, op) {
+  const n = $bigint(b, op);
+  if (n < 0n) throw $b.ValueError("negative shift count");
+  return n;
+}
+
 function $lshift(a, b) {
-  return Number($bigint(a, "<<") << $bigint(b, "<<"));
+  const x = $bigint(a, "<<");
+  return Number(x << $shiftCount(b, "<<"));
 }
 
 function $rshift(a, b) {
-  return Number($bigint(a, ">>") >> $bigint(b, ">>"));
+  const x = $bigint(a, ">>");
+  return Number(x >> $shiftCount(b, ">>"));
+}
+
+// An argument that must be an int (a bool counts as one), as Python's __index__ requires.
+function $intArg(n) {
+  if (typeof n === "boolean") return +n;
+  if (typeof n === "number" && Number.isInteger(n)) return n;
+  throw $b.TypeError(`'${$typename(n)}' object cannot be interpreted as an integer`);
 }
 
 // ---- iteration, indexing, attributes ------------------------------------------
@@ -518,13 +560,18 @@ function $gi(o, k) {
   } else if (o instanceof Map) {
     if (!o.has(k)) throw $b.KeyError($repr(k));
     return o.get(k);
+  } else if ($noItems(o)) {
+    throw $b.TypeError(`'${$typename(o)}' object is not subscriptable`);
   }
   return o[k];
 }
 
+// A number, bool or set has no items: o[k] would read a JavaScript property (5["valueOf"]).
+const $noItems = (o) => typeof o === "number" || typeof o === "boolean" || o instanceof Set;
+
 function $si(o, k, v) {
   if (o === null || o === undefined) throw $b.TypeError("'NoneType' object does not support item assignment");
-  if ($isTup(o)) throw $b.TypeError("'tuple' object does not support item assignment");
+  if ($isTup(o) || $noItems(o)) throw $b.TypeError(`'${$typename(o)}' object does not support item assignment`);
   if (Array.isArray(o)) {
     const n = $index(o, k);
     const i = n < 0 ? o.length + n : n;
@@ -539,7 +586,7 @@ function $si(o, k, v) {
 }
 
 function $del(o, k) {
-  if ($isTup(o)) throw $b.TypeError("'tuple' object doesn't support item deletion");
+  if ($isTup(o) || $noItems(o)) throw $b.TypeError(`'${$typename(o)}' object doesn't support item deletion`);
   if (Array.isArray(o)) {
     const n = $index(o, k);
     const i = n < 0 ? o.length + n : n;
@@ -553,11 +600,21 @@ function $del(o, k) {
   }
 }
 
+// A slice bound: an int (a bool counts as one) or None, as Python requires.
+function $sliceIndex(i) {
+  if (i === null || i === undefined || (typeof i === "number" && Number.isInteger(i))) return i;
+  if (typeof i === "boolean") return +i;
+  throw $b.TypeError("slice indices must be integers or None or have an __index__ method");
+}
+
 function $slice(source, start, stop, step) {
   const o = typeof source === "string" ? $chars(source) : source;
   const len = o.length;
+  step = $sliceIndex(step);
   step = step === null || step === undefined ? 1 : step;
   if (step === 0) throw $b.ValueError("slice step cannot be zero");
+  start = $sliceIndex(start);
+  stop = $sliceIndex(stop);
   const norm = (i, dflt, lo, hi) => {
     if (i === null || i === undefined) return dflt;
     if (i < 0) i += len;
@@ -1092,7 +1149,11 @@ function $toFloat(x = 0) {
 // which rounds correctly, so no digit is lost on the way.
 function $round(x, n) {
   if (typeof x === "boolean") x = +x;
+  if (typeof x !== "number") throw $b.TypeError(`type ${$typename(x)} doesn't define __round__ method`);
   if (n === undefined || n === null) {
+    // round(x) is an int, so like int(x) it refuses what no int can be (round(x, n) doesn't).
+    if (Number.isNaN(x)) throw $b.ValueError("cannot convert float NaN to integer");
+    if (!Number.isFinite(x)) throw $b.OverflowError("cannot convert float infinity to integer");
     const r = Math.round(x);
     return Math.abs(x % 1) === 0.5 && r % 2 !== 0 ? r - 1 : r; // banker's rounding
   }
@@ -1227,8 +1288,12 @@ Object.assign($b, {
   sum: $fn($sum, ["iterable", "start"]),
   min: $minmax("min"),
   max: $minmax("max"),
-  abs: Math.abs,
-  round: $round,
+  abs(x) {
+    if (typeof x === "boolean") return +x;
+    if (typeof x !== "number") throw $b.TypeError(`bad operand type for abs(): '${$typename(x)}'`);
+    return Math.abs(x);
+  },
+  round: $fn($round, ["number", "ndigits"]),
   any: (it) => [...$iter(it)].some($t),
   all: (it) => [...$iter(it)].every($t),
   map: (f, ...its) => $b.zip(...its).map((args) => f(...args)),
@@ -1250,8 +1315,18 @@ Object.assign($b, {
     return typeof T === "function" && x instanceof T;
   },
   repr: $repr,
-  chr: (n) => String.fromCodePoint(n),
-  ord: (s) => s.codePointAt(0),
+  chr(n) {
+    n = $intArg(n);
+    if (n > 2147483647 || n < -2147483648) throw $b.OverflowError("Python int too large to convert to C int");
+    if (n < 0 || n > 0x10ffff) throw $b.ValueError("chr() arg not in range(0x110000)");
+    return String.fromCodePoint(n);
+  },
+  ord(s) {
+    if (typeof s !== "string") throw $b.TypeError(`ord() expected string of length 1, but ${$typename(s)} found`);
+    const n = $cpLen(s);
+    if (n !== 1) throw $b.TypeError(`ord() expected a character, but string of length ${n} found`);
+    return s.codePointAt(0);
+  },
   divmod: (a, b) => $tup($divmod2(a, b, "divmod()")),
   pow: $fn((base, exp, mod = null) => (mod === null || mod === undefined ? $pow(base, exp) : $powmod(base, exp, mod)),
     ["base", "exp", "mod"]),
@@ -1542,6 +1617,24 @@ const $STR = {
     const n = w - $cpLen(s);
     if (n <= 0) return s;
     return s[0] === "-" || s[0] === "+" ? s[0] + "0".repeat(n) + s.slice(1) : "0".repeat(n) + s;
+  },
+  expandtabs(s, [tabsize = 8], kw) {
+    const size = $intArg(kw.tabsize !== undefined ? kw.tabsize : tabsize);
+    let out = "";
+    let column = 0;
+    for (const c of s) {
+      if (c === "\t") {
+        if (size > 0) {
+          const n = size - (column % size);
+          out += " ".repeat(n);
+          column += n;
+        }
+      } else {
+        out += c;
+        column = c === "\n" || c === "\r" ? 0 : column + 1;
+      }
+    }
+    return out;
   },
   ljust: (s, [w, c = " "]) => s + $fillArg(c).repeat(Math.max(0, w - $cpLen(s))),
   rjust: (s, [w, c = " "]) => $fillArg(c).repeat(Math.max(0, w - $cpLen(s))) + s,

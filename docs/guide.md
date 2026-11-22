@@ -801,7 +801,10 @@ keyword arguments, `*args`/`**kwargs`, and the builtins you would expect (`len`,
 `enumerate`, `zip`, `sorted`, `min`, `max`, `sum`, `any`, `all`, `abs`, `round`, `str`,
 `int`, `float`, `bool`, `list`, `dict`, `set`, `tuple`, `map`, `filter`, `isinstance`,
 `print`). `math` and `json` are available. Anything unsupported is a **compile error at
-start-up**, with the file, the line and a hint — not a surprise in someone's browser.
+start-up**, with the file, the line and a hint — not a surprise in someone's browser. That
+includes a method the browser runtime doesn't have (`encode`, `translate`, `format_map`…)
+called on a literal (`"x".encode()`, `{}.fromkeys(keys)`); called on a variable, whose type
+the compiler can't see, it raises `AttributeError` when it runs.
 
 Not compiled, by design: `import` inside a function, classes, the database, the file
 system, and modules that only exist on the server.
@@ -831,12 +834,23 @@ system, and modules that only exist on the server.
   `any(check(x) for x in xs)` and `all(...)` call `check` for every item instead of stopping
   at the first answer. The result is the same; write a loop with `break` when the calls are
   expensive or have side effects.
+- Adding or removing a dict's keys inside a loop over that dict (or over its `keys()`,
+  `values()` or `items()`) doesn't raise `RuntimeError`: the loop runs over the keys the dict
+  had when it began. Python raises; loop over `list(d)` when the body changes the dict, on
+  both sides.
+- Code that is wrong in two places at once, or passes a builtin an argument of the wrong type,
+  can still fail differently: `x[i] = y` evaluates `x` and `i` before `y`, so when both sides
+  raise the browser reports the other error, and a few builtins and methods accept argument
+  types Python refuses (`"ab".removesuffix(1.5)`, `math.floor([1])`). Code that works in
+  Python is not affected.
 
 Tuples are real tuples — `(1, 2) != [1, 2]`, immutable, and `enumerate`/`zip`/`.items()`
 yield them — and strings are measured and indexed in code points, so `len("😀")` is 1.
-Errors are Python's too: `/`, `//`, `%` and `**` by zero raise `ZeroDivisionError`, ordering
-`None` or mixed types (`None < 1`, `"a" < 1`) raises `TypeError`, and `float("")` raises
-`ValueError`. All of this is checked by a parity suite that runs every sample in CPython and
+Errors are Python's too: `/`, `//`, `%` and `**` by zero raise `ZeroDivisionError`; ordering
+`None` or mixed types (`None < 1`, `"a" < 1`) raises `TypeError`, as do arithmetic on the wrong
+types (`"a" + 1`, `[1] + 0`, `-"a"`, `"a" ** 2`), a slice bound that isn't an int, `**` of a
+non-dict, indexing a number or a set, `ord("ab")` and `abs("a")`; `float("")`, `chr(-1)` and a
+negative shift count raise `ValueError`, and `round(float("inf"))` raises `OverflowError`. All of this is checked by a parity suite that runs every sample in CPython and
 in Node and compares the results.
 
 **One limit that isn't about the browser:** the first argument to `Jongo()` should be

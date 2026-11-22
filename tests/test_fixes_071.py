@@ -9,15 +9,19 @@ from __future__ import annotations
 import encodings
 import io
 import time
+from pathlib import Path
 
 import pytest
 
 from jongo import db, forms
+from jongo.compiler.bundle import Bundler
 from jongo.db import connection
 from jongo.db.dialect import translate
+from jongo.errors import CompileError
 from jongo.http import Request
 
 from conftest import use_test_database
+from test_compiler import needs_node, normalise, run_in_node
 
 # ------------------------------------------------------------ multipart part headers --
 
@@ -261,3 +265,147 @@ def test_choice_reads_an_integral_float_as_its_int():
     schema = forms.Schema("S", level=forms.Choice([(1, "Low"), (2, "High")]))
     assert forms.validate(schema, {"level": 2.0}) == {}
     assert schema.clean({"level": 2.0}) == {"level": 2}
+
+
+# ------------------------------------------------------- compiler / browser parity --
+
+
+def s_builtin_errors_are_pythons():
+    """Which except clause catches each failure: the browser must raise the same type."""
+    out = []
+    for f in (lambda: chr(-1), lambda: chr(0x110000), lambda: chr(2 ** 31), lambda: chr(1.5),
+              lambda: ord("ab"), lambda: ord(""), lambda: ord(5),
+              lambda: abs("a"), lambda: abs([1, 2]), lambda: abs(None),
+              lambda: 8 >> -1, lambda: 8 << -1, lambda: round(float("inf")), lambda: round(float("-inf")),
+              lambda: round(float("nan")), lambda: round("a"), lambda: round(2.5, 1.5),
+              lambda: "a\tb".expandtabs(2.5)):
+        try:
+            f()
+            out.append("no error")
+        except ValueError:
+            out.append("ValueError")
+        except OverflowError:
+            out.append("OverflowError")
+        except TypeError:
+            out.append("TypeError")
+        except IndexError:
+            out.append("IndexError")
+    return out
+
+
+def s_builtins_still_work():
+    tab = "\t"
+    return [chr(65), chr(0x1F600) == "\U0001F600", ord("\U0001F600"), ord("a"), abs(-2.5), abs(True), abs(-7),
+            8 >> 1, 1 << 40, 5 >> 0, round(2.5, ndigits=1), round(2.675, ndigits=2), round(1234.5, ndigits=-1),
+            round(float("inf"), 1) == float("inf"), round(-0.5), round(1.5),
+            "a\tb".expandtabs(), "a\tb\ncd\te".expandtabs(4), "ab\rc\td".expandtabs(tabsize=3),
+            (tab + "x").expandtabs(0), (tab + "x").expandtabs(-1), "\U0001F600\tx".expandtabs(4), "".expandtabs()]
+
+
+def s_operators_on_wrong_types_raise():
+    """+, -, *, **, unary -/+, slicing, ** unpacking and subscripting on the wrong types raise
+    TypeError, as in CPython, instead of JavaScript's coercion ("1,2" + 0, "a" - 1 is NaN,
+    [1, 2][1.5:], 5["valueOf"])."""
+    a, items, none = "a", [1, 2], None
+
+    def take(**kw):
+        return kw
+
+    def set_item(target):
+        target[0] = 1
+
+    def del_item(target):
+        del target[0]
+
+    five, yes, pair = 5, True, {1, 2}
+    out = []
+    for f in (lambda: a + 1, lambda: 1 + a, lambda: items + 0, lambda: none + items, lambda: (1,) + items,
+              lambda: a - a, lambda: items - 1, lambda: a * a, lambda: items * 2.5, lambda: none * 2,
+              lambda: 2 * none, lambda: -a, lambda: +items, lambda: -none, lambda: a ** 2, lambda: items ** 2,
+              lambda: items[1.5:], lambda: "abc"[::"x"], lambda: items[:none or "1"], lambda: take(**items),
+              lambda: take(**a), lambda: {**items}, lambda: 2 + "a", lambda: "n=" + 1, lambda: five["valueOf"],
+              lambda: yes[0], lambda: pair[0], lambda: set_item(pair), lambda: del_item(five)):
+        try:
+            f()
+            out.append("no error")
+        except TypeError:
+            out.append("TypeError")
+    return out
+
+
+def s_operators_on_right_types_still_work():
+    n, t, items = 2, True, [1, 2, 3]
+
+    def take(**kw):
+        return sorted(kw.items())
+
+    return ["a" + "b", [1] + [2], repr((1,) + (2,)), 2 * "ab", "ab" * 2, t * [1], [0] * 3, -n, +n, -t, +t,
+            n ** 2, 2 ** -1, n ** 0.5 > 1.41, items[t:], items[::-1], items[1:None], "abc"[::2],
+            {**{"a": 1}, "b": 2}, take(**{"k": 1}), n - t, 1.5 * n, f"{n}" + "!", -(-n)]
+
+
+SAMPLES = {name: fn for name, fn in dict(globals()).items() if name.startswith("s_")}
+
+
+@needs_node
+def test_builtins_match_cpython(tmp_path):
+    results = run_in_node(SAMPLES, tmp_path)
+    for name, fn in SAMPLES.items():
+        assert results[name].get("ok") == normalise(fn()), (name, results[name])
+
+
+def literal_str_method():
+    return "abc".encode()
+
+
+def literal_fstring_method(x):
+    return f"{x}".format_map({})
+
+
+def literal_list_method():
+    return [3, 1].bit_length()
+
+
+def literal_dict_method():
+    return {"a": 1}.fromkeys(["b"])
+
+
+def literal_attribute_read():
+    return "abc".translate
+
+
+@pytest.mark.parametrize("fn", [literal_str_method, literal_fstring_method, literal_list_method,
+                                literal_dict_method, literal_attribute_read], ids=lambda f: f.__name__)
+def test_a_missing_method_on_a_literal_is_a_compile_error(fn):
+    with pytest.raises(CompileError) as info:
+        Bundler(roots=[Path(__file__).parent]).resolve(fn.__name__, fn)
+    assert info.value.code == "J103"
+
+
+def literal_methods_that_exist():
+    return [" a ".strip(), ",".join(["a", "b"]), "{}!".format(1), [1, 2].index(2), {"a": 1}.get("a"),
+            {1, 2}.union({3}), (1, 2).count(1), "a\tb".expandtabs(2), [x for x in "ab"].copy()]
+
+
+def test_supported_methods_on_literals_still_compile():
+    Bundler(roots=[Path(__file__).parent]).resolve(
+        "literal_methods_that_exist", literal_methods_that_exist)
+
+
+def dict_mutation_limit_sample():
+    """guide §18: the browser loops over the keys a dict had when the loop began, and doesn't
+    raise RuntimeError when the loop changes them (CPython does). Pinned so a change is seen."""
+    d = {"a": 1}
+    seen = []
+    for k in d:
+        seen.append(k)
+        d[k + "x"] = 1
+    return seen
+
+
+@needs_node
+def test_documented_dict_mutation_limit(tmp_path):
+    with pytest.raises(RuntimeError):
+        dict_mutation_limit_sample()
+    results = run_in_node({"dict_mutation_limit_sample": dict_mutation_limit_sample}, tmp_path)
+    assert results["dict_mutation_limit_sample"] == {"ok": ["a"]}
