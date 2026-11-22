@@ -124,8 +124,9 @@ def portable_pattern(pattern: str) -> str:
 
     Raises:
         JongoError: code ``J115`` when the pattern uses syntax only one engine has (named
-            groups, inline flags, ``\\A``/``\\Z``, ``\\a``, ``\\U``, octal escapes, possessive
-            quantifiers, ``{,n}``, an unescaped literal ``{`` or ``}``), or doesn't compile.
+            groups, inline flags, ``\\A``/``\\Z``, ``\\a``, ``\\U``, ``\\B``, octal escapes,
+            possessive quantifiers, ``{,n}``, an unescaped literal ``{`` or ``}``, a quantifier on
+            a lookahead or lookbehind), or doesn't compile.
 
     Example::
 
@@ -140,11 +141,17 @@ def portable_pattern(pattern: str) -> str:
                 code="J115", hint="write it with plain groups and character classes, e.g. [A-Za-z] instead of (?i)",
             )
     out, in_class, i = [], False, 0
+    groups = []  # for each open group: is it a lookahead/lookbehind?
     while i < len(pattern):
         ch = pattern[i]
         if ch == "\\" and i + 1 < len(pattern):
             nxt = pattern[i + 1]
             i += 2
+            if nxt == "B" and not in_class:
+                raise JongoError(
+                    f"the pattern {pattern!r} uses \\B, which Python and JavaScript read differently on an empty value",
+                    code="J115", hint="describe the characters on each side instead",
+                )
             if nxt in _SHORTHAND:
                 out.append(_SHORTHAND[nxt] if in_class else f"[{_SHORTHAND[nxt]}]")
             elif nxt in _NEGATED:
@@ -170,6 +177,15 @@ def portable_pattern(pattern: str) -> str:
                 out.append("\\]")
                 i += 1
             continue
+        if ch == "(" and not in_class:
+            groups.append(pattern.startswith(("(?=", "(?!", "(?<=", "(?<!"), i))
+        elif ch == ")" and not in_class and groups and groups.pop():
+            after = pattern[i + 1:i + 2]
+            if after in ("?", "*", "+") or (after == "{" and _BRACE_QUANTIFIER.match(pattern, i + 1)):
+                raise JongoError(
+                    f"the pattern {pattern!r} repeats a lookahead or lookbehind, which JavaScript refuses",
+                    code="J115", hint="drop the quantifier: an assertion matches no characters, so repeating it changes nothing",
+                )
         if ch == "]" and in_class:
             in_class = False
         elif ch == "]":

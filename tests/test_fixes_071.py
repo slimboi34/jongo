@@ -17,7 +17,7 @@ from jongo import db, forms
 from jongo.compiler.bundle import Bundler
 from jongo.db import connection
 from jongo.db.dialect import translate
-from jongo.errors import CompileError
+from jongo.errors import CompileError, JongoError
 from jongo.http import Request
 
 from conftest import use_test_database
@@ -254,6 +254,20 @@ def test_inlined_literals_beside_bound_floats_translate_for_postgres():
 ])
 def test_portable_pattern_escapes_a_lone_closing_bracket(pattern, portable):
     assert forms.portable_pattern(pattern) == portable
+
+
+@pytest.mark.parametrize("pattern", [r"(?!$)(?!$){2}", r"((?=\n)+?)", r"(?<!a)?b", r"(?=a)*", r"\B", r"a\Bb"])
+def test_portable_pattern_refuses_what_javascript_reads_differently(pattern):
+    # A repeated lookaround is a SyntaxError in a u-mode RegExp; \B matches an empty value in
+    # JavaScript and not in Python. Both used to pass portable_pattern().
+    with pytest.raises(JongoError) as info:
+        forms.portable_pattern(pattern)
+    assert info.value.code == "J115"
+
+
+@pytest.mark.parametrize("pattern", [r"(?=a)b", r"(?!x)[a-z]+", r"(a)?", r"(?:ab)+", r"a\b", r"[(?=a)]+"])
+def test_portable_pattern_still_accepts_plain_groups_and_assertions(pattern):
+    assert forms.portable_pattern(pattern) == pattern
 
 
 def test_choice_reads_an_integral_float_as_its_int():

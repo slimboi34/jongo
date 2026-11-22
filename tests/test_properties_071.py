@@ -230,7 +230,8 @@ def test_forms_check_agrees_server_and_browser():
 
 
 def _patterns(rng: random.Random, count: int) -> list[str]:
-    alphabet = ["a", "b", "0", "[", "]", "^", "-", "(", ")", "|", "*", "+", "?", ".", "\\d", "\\]", "\\[", "{2}", "A-Z"]
+    alphabet = ["a", "b", "0", "[", "]", "^", "-", "(", ")", "|", "*", "+", "?", ".", "\\d", "\\]", "\\[", "{2}", "A-Z",
+                "(?=a)", "(?!b)", "(?<=a)", "\\b", "\\B", "$"]
     out = [r"[A-Z]+]", r"a]", r"(a|b])", r"\d]", r"[]a]", r"[^]a]"]
     while len(out) < count:
         out.append("".join(rng.choice(alphabet) for _ in range(rng.randint(1, 7))))
