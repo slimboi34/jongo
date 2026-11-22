@@ -293,14 +293,12 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
     conditions: list[str] = []
     params: list = []
     if present:
+        # Inline SQL-safe literals (ints, strings) so a huge __in list can't exceed SQLite's
+        # bound-variable limit (which counts total "?", so OR-chunking bound params would not
+        # help); the rest (floats, dates...) are bound, in the order their "?" appear.
         literals = [_sql_literal(v) for v in present]
-        if all(lit is not None for lit in literals):
-            # Inline SQL-safe literals so a huge __in list can't exceed SQLite's bound-variable
-            # limit (which counts total "?", so OR-chunking bound params would not help).
-            conditions.append(f"{column} IN ({', '.join(literals)})")
-        else:
-            conditions.append(f"{column} IN ({', '.join('?' * len(present))})")
-            params = present
+        params = [v for v, lit in zip(present, literals) if lit is None]
+        conditions.append(f"{column} IN ({', '.join('?' if lit is None else lit for lit in literals)})")
     if has_null:
         conditions.append(f"{column} IS NULL")
     if not conditions:
@@ -311,13 +309,16 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
 
 
 def _sql_literal(value):
-    """A safe inline SQL literal for common types, or None if it must be a bound parameter."""
+    """A safe inline SQL literal for common types, or None if it must be a bound parameter.
+
+    A float is always bound: SQLite's text-to-double parser doesn't give back the exact double
+    that ``repr()`` names for every value (1e-300 reads as a neighbour), so an inlined float
+    could miss a row that ``exact`` (a bound parameter) matches.
+    """
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, int):
         return str(value)
-    if isinstance(value, float):
-        return repr(value) if value == value and value not in (float("inf"), float("-inf")) else None
     if isinstance(value, str):
         if "\x00" in value:
             return None

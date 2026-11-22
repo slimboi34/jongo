@@ -12,7 +12,12 @@ import time
 
 import pytest
 
+from jongo import db
+from jongo.db import connection
+from jongo.db.dialect import translate
 from jongo.http import Request
+
+from conftest import use_test_database
 
 # ------------------------------------------------------------ multipart part headers --
 
@@ -171,3 +176,63 @@ def test_request_content_type_boundary_parse_is_linear(filler):
 
     small, large = seconds(4000), seconds(56000)
     assert large <= 42 * small + 0.002, (small, large)
+
+
+# --------------------------------------------------------------- floats in __in --
+
+
+@pytest.fixture
+def memory_db():
+    saved_registry = dict(db.models_registry)
+    saved_database = connection._database
+    db.models_registry.clear()
+    use_test_database()
+    yield
+    db.close_connections()
+    db.models_registry.clear()
+    db.models_registry.update(saved_registry)
+    connection._database = saved_database
+
+
+FLOATS = [-2.901816873243615e-258, 1e-300, 1.23456789e-290, 6.022e-280, -3.5e-310, 5e-324, 0.1, 1 / 3,
+          -0.0, 1.7976931348623157e308, 123456789.123456789]
+
+
+def test_float_in_matches_exact(memory_db):
+    class Reading(db.Model):
+        value = db.Float(null=True)
+
+    db.migrate()
+    for v in FLOATS:
+        Reading.create(value=v)
+    for v in FLOATS:
+        via_in = sorted(r.id for r in Reading.filter(value__in=[v]))
+        via_exact = sorted(r.id for r in Reading.filter(value=v))
+        assert via_in == via_exact and via_in, v
+    assert Reading.filter(value__in=FLOATS).count() == len(FLOATS)
+    assert Reading.exclude(value__in=FLOATS[:3]).count() == len(FLOATS) - 3
+
+
+def test_in_binds_floats_and_still_inlines_ints_and_strings(memory_db):
+    from jongo.db.query import compile_lookup
+
+    class Item(db.Model):
+        n = db.Int(null=True)
+        price = db.Float(null=True)
+        tag = db.Text(null=True)
+
+    db.migrate()
+    sql, params = compile_lookup(Item, "price__in", [1e-300, 2.5])
+    assert sql.count("?") == 2 and params == [1e-300, 2.5]
+    sql, params = compile_lookup(Item, "tag__in", ["50%", "a?b", None])
+    assert "'50%'" in sql and "'a?b'" in sql and params == []
+    # A huge int list stays inlined: bound, it would pass SQLite's variable limit (32,766).
+    Item.create(n=39_999)
+    assert Item.filter(n__in=list(range(40_000))).count() == 1
+
+
+def test_inlined_literals_beside_bound_floats_translate_for_postgres():
+    # A list that mixes inlined literals and bound values must keep both right on psycopg's
+    # %s paramstyle: ? inside a literal is text, % inside it is doubled, and each ? is a %s.
+    sql = '"tag" IN (\'50%\', \'a?b\', ?)'
+    assert translate(sql, True, "%s") == '"tag" IN (\'50%%\', \'a?b\', %s)'
