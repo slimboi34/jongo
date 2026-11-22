@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.7.1 (2026-11-22)
+
+**A machine-driven test of 0.7.0.** 0.7.0's fixes came from probing by hand; this release
+comes from machines: differential fuzzing of the compiler on about 125,000 programs (CPython
+against the compiled code under Node), forms parity over about 145,000 inputs, an ORM oracle
+over about 200,000 runs, about 187,000 raw HTTP requests against a production and a dev
+server, and mutation testing of 422 mutants of the lines 0.7.0 changed. It confirmed 12
+defects (1 high, 6 medium and 5 low severity): 11 are fixed and one is documented. Re-running
+the compiler and forms campaigns against the fixes found more of the same kind, fixed here
+too, and a review of the new header parser found a memory leak beside it. The HTTP servers
+held up: no 500s and no tracebacks across all the raw requests. Still zero dependencies.
+Tests: 977 → 1073 (`tests/test_fixes_071.py`, `test_properties_071.py` and
+`test_mutation_killers_071.py`), passing forwards and in reversed file order on Python 3.12.
+
+Read before upgrading: browser code that relied on JavaScript's coercion (`"n=" + 1`, `-"a"`,
+`[1, 2][1.5:]`) now raises `TypeError`, as the server already did; a str, list or dict method
+the browser lacks, called on a literal, is a compile error (`J103`); `portable_pattern()`
+refuses two more constructs (`J115`); and a multipart part with more than 64 header lines, or
+a header with more than 64 parameters, is a 400.
+
+### Security
+
+- **One multipart form could cost about 30 CPU-minutes, before authentication.** Each part's
+  headers were read with the email package, whose parameter splitter re-scans a header for
+  every `;`: one 14 KB `Content-Disposition` of `;"` pairs took about 2 s, and a 16 MB
+  request holds 1000 parts. Form routes parse the body inside the CSRF check, so a cookie
+  from any GET was enough. Part headers are now read by a small parser that is linear in their
+  size (one regex scan per header value); that request is refused in about 10 ms, and a part
+  with more than 64 header lines, or a header with more than 64 parameters, is a 400
+  (`J212`). Quoted strings, RFC 2231/5987 `filename*` values (with continuations) and RFC 2047
+  encoded words in a quoted name or filename are decoded as before. When a part sends both
+  `filename` and `filename*`, the extended one now wins, as RFC 6266 says. The request's own
+  `boundary=` goes through the same parser.
+- **Charset names in a form grew the server's memory without bound.** `codecs.lookup()`
+  caches every name it fails to find, forever (`encodings._cache`), and a part's `charset=`
+  was looked up as sent: five requests naming a fresh 8 KB charset per part kept 40 MB. Only
+  names the standard library knows are looked up now; any other is read as UTF-8, as an
+  unusable charset already was.
+
+### Fixed
+
+- **ORM: `filter(col__in=[x])` missed rows that `filter(col=x)` matched** for some floats
+  (`1e-300`, `-2.9e-258`). The float was inlined as `repr(x)`, which SQLite reads back as a
+  neighbouring double. Floats are now bound parameters. Ints and strings are still inlined,
+  so a long list can't pass SQLite's bound-variable limit, and a list that mixes the two binds
+  only the values that need it.
+- **Forms: `portable_pattern()` passed patterns the browser can't run.** A lone `]` outside a
+  character class (`[A-Z]+]`) is a literal in Python and a syntax error in a u-mode RegExp, so
+  every browser-side `check()` on that field threw; it is now escaped to `\]`. A repeated
+  lookahead or lookbehind (`(?!x){2}`) and `\B` (which matches an empty value in JavaScript
+  only) are refused with `J115`.
+- **Forms: `Choice([2])` accepted `2.0` in the browser and refused it on the server**, because
+  `str(2.0)` differs between them. An integral float is now compared, and cleaned, as its int
+  on both sides.
+- **Browser code raised other errors than CPython, or none**, so an `except` clause behaved
+  differently. Each now raises what CPython raises:
+  - `ord("ab")` returned the first code point: `TypeError`.
+  - `abs("a")` and `abs([1, 2])` returned `NaN`: `TypeError`.
+  - `8 >> -1` and `8 << -1` shifted the other way: `ValueError`.
+  - `round(x, ndigits=n)` raised `TypeError`; the keyword works.
+  - `round(float("inf"))` and `round(float("nan"))` returned inf and nan: `OverflowError` and
+    `ValueError`.
+  - `chr(-1)` raised what `except IndexError` catches: `ValueError` (`OverflowError` past a C
+    int).
+  - `"a\tb".expandtabs()` compiled, then raised `AttributeError` when it ran; it is
+    implemented. A method the runtime lacks, called on a literal (`"x".encode()`), is now a
+    compile error (`J103`) at start-up.
+- **Browser operators coerced the wrong types instead of raising `TypeError`** (found by the
+  re-run): `"a" + 1`, `[1] + 0` (`"1,20"`), `"a" - 1` (`NaN`), `"a" * "a"`, `-"a"`, `"a" ** 2`,
+  a slice bound that isn't an int, `**` of a list, `5["valueOf"]`, and item assignment to a
+  number or a set. A bare JavaScript `+` was also emitted when only one side was a string
+  literal, so `"n=" + 1` concatenated. The number and string fast paths are unchanged.
+
+### Known limits
+
+- A dict changed inside a loop over it doesn't raise `RuntimeError` in the browser: the loop
+  runs over the keys it began with (guide §18). A guard made every dict loop 1.7 to 4.5 times
+  slower and would still miss `.items()`, `.keys()` and `.values()`, which return lists.
+- The compiler differential still finds browser code that fails differently from CPython when
+  it is wrong twice over or passes a builtin the wrong type of argument: `x[i] = y` evaluates
+  `x` and `i` before `y`, and a few methods and `math` functions accept types CPython refuses
+  (`"ab".removesuffix(1.5)`, `math.floor([1])`). Code that runs in CPython is not affected.
+- An `__in` list that would bind more than `db.query.MAX_BOUND_IN` (10,000) values inlines its
+  floats as text, as 0.7.0 did, so the extreme magnitudes above can still miss in such a list.
+- PostgreSQL was not available: the `__in` change is verified on SQLite only, and the 13
+  PostgreSQL tests were skipped. The browser fixes were tested under Node, not in a real
+  browser. The 0.7.0 limits still apply.
+
 ## 0.7.0 (2026-11-21)
 
 **Hardening.** This release is the result of a stress test of 0.6.0. Fable planned seven
