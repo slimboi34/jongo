@@ -231,8 +231,14 @@ def test_in_binds_floats_and_still_inlines_ints_and_strings(memory_db):
     sql, params = compile_lookup(Item, "tag__in", ["50%", "a?b", None])
     assert "'50%'" in sql and "'a?b'" in sql and params == []
     # A huge int list stays inlined: bound, it would pass SQLite's variable limit (32,766).
-    Item.create(n=39_999)
+    Item.create(n=39_999, price=39_999.5)
     assert Item.filter(n__in=list(range(40_000))).count() == 1
+    # So does a huge float list, past MAX_BOUND_IN (as in 0.7.0), rather than fail.
+    assert Item.filter(price__in=[i + 0.5 for i in range(40_000)]).count() == 1
+    from jongo.db.query import MAX_BOUND_IN
+
+    sql, params = compile_lookup(Item, "price__in", [i + 0.5 for i in range(MAX_BOUND_IN + 1)])
+    assert params == [] and "10000.5" in sql
 
 
 def test_inlined_literals_beside_bound_floats_translate_for_postgres():

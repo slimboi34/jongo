@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -297,6 +298,11 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
         # bound-variable limit (which counts total "?", so OR-chunking bound params would not
         # help); the rest (floats, dates...) are bound, in the order their "?" appear.
         literals = [_sql_literal(v) for v in present]
+        if sum(lit is None for lit in literals) > MAX_BOUND_IN:
+            # So many that binding them could pass the variable limit: inline the floats too,
+            # as 0.7.0 did (exact for all but some extreme magnitudes; see _sql_literal).
+            literals = [repr(v) if lit is None and isinstance(v, float) and math.isfinite(v) else lit
+                        for v, lit in zip(present, literals)]
         params = [v for v, lit in zip(present, literals) if lit is None]
         conditions.append(f"{column} IN ({', '.join('?' if lit is None else lit for lit in literals)})")
     if has_null:
@@ -306,6 +312,10 @@ def _in_condition(field: Field, column: str, value: Any) -> tuple[str, list]:
     if len(conditions) == 1:
         return conditions[0], params
     return f"({' OR '.join(conditions)})", params
+
+
+#: The most values one ``__in`` binds as parameters; past it, floats are inlined as text.
+MAX_BOUND_IN = 10_000
 
 
 def _sql_literal(value):
