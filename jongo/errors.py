@@ -347,7 +347,8 @@ CATALOGUE: dict[str, dict] = {
         "The request body couldn't be read: it isn't valid JSON, the "
         "Content-Length header is invalid, it is larger than the app's limit (Request.max_body_size), or "
         "a form has more fields or multipart parts than Request.max_form_fields / Request.max_form_parts "
-        "allow (1000 each). Oversized bodies and forms are refused with a 413 before they are parsed.",
+        "allow (1000 each). Oversized bodies and forms are refused with a 413 before they are parsed; a "
+        "multipart part whose headers are over 16 KB, 64 lines or 64 parameters is a 400.",
         "Send a valid JSON body with Content-Type: application/json and a correct Content-Length; for "
         "larger uploads raise jongo.Request.max_body_size (16 MB by default), for bigger forms "
         "Request.max_form_fields / max_form_parts.",

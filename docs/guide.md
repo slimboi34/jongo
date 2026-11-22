@@ -671,9 +671,10 @@ What Jongo does by default:
 - **Form input is whitelisted.** A `forms.Schema` returns only the fields it declares.
 - **Limits.** Request bodies are capped at `Request.max_body_size` (16 MB), and forms at
   `Request.max_form_fields` and `Request.max_form_parts` (1000 each); over a limit the answer
-  is a 413 (`J212`) before the body is parsed. A bogus `Content-Length` is rejected before
-  the body is read. Raise them on the class for an app that needs more:
-  `Request.max_form_fields = 5000`.
+  is a 413 (`J212`) before the body is parsed. One part's headers may be 16 KB, 64 lines and
+  64 parameters per header (a 400, `J212`, past that), and are read in time linear in their
+  size. A bogus `Content-Length` is rejected before the body is read. Raise the form limits
+  on the class for an app that needs more: `Request.max_form_fields = 5000`.
 - **`to_dict()`** never includes password hashes.
 
 What you still have to do: set `JONGO_SECRET_KEY` in production, authorise your own

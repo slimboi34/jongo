@@ -4,14 +4,15 @@ from __future__ import annotations
 import base64
 import binascii
 import codecs
-import email.message
-import email.parser
-import email.policy
+import encodings
+import encodings.aliases
+import functools
 import hashlib
 import hmac
 import http.cookies
 import ipaddress
 import json
+import pkgutil
 import quopri
 import re
 import secrets
@@ -34,6 +35,10 @@ IN_PROCESS_HOST = "jongo.in_process_host"
 
 #: The longest header block one part of a multipart form may have.
 _MAX_PART_HEADERS = 16 * 1024
+#: The most header lines one part may have, and the most parameters one header value may carry.
+#: Real clients send two or three of each; the caps bound the per-part work whatever the bytes.
+_MAX_PART_HEADER_LINES = 64
+_MAX_HEADER_PARAMS = 64
 #: Charsets a multipart part may not name: their decoders are quadratic on crafted input.
 _SLOW_CODECS = frozenset(("punycode", "idna"))
 
@@ -341,19 +346,11 @@ class Request:
             raise HTTPError(413, f"The form has more than {self.max_form_parts} parts", code="J212",
                             hint="send fewer fields and files, or raise jongo.Request.max_form_parts")
         pairs, files = [], {}
-        header_parser = email.parser.BytesHeaderParser(policy=email.policy.HTTP)
         for raw in _multipart_parts(body, delimiter):
             head, data = _split_part(raw)
-            try:
-                part = header_parser.parsebytes(head + b"\r\n\r\n")
-                name = part.get_param("name", header="content-disposition")
-                filename = part.get_filename()
-                content_type = part.get_content_type()
-                charset = part.get_content_charset()
-                encoding = str(part.get("content-transfer-encoding", "")).strip().lower()
-            except Exception:  # the stdlib header parser is lenient, but nothing it raises may become a 500
-                raise HTTPError(400, "Malformed multipart form: a part's headers can't be read",
-                                code="J212") from None
+            # Not the email package: its parameter splitter re-scans a header for every ";", so a
+            # crafted 16 KB part header cost seconds, before authentication. This parse is linear.
+            name, filename, content_type, charset, encoding = _part_info(head)
             if not name:
                 continue
             data = _transfer_decode(data, encoding)
@@ -453,10 +450,8 @@ def _same_site_origin(origin: str, scheme: str, host: str) -> bool:
 def _multipart_boundary(content_type: str) -> bytes | None:
     """The boundary parameter of a multipart Content-Type, if it is a usable one."""
     try:
-        message = email.message.Message()
-        message["Content-Type"] = content_type
-        boundary = message.get_param("boundary")
-    except Exception:
+        boundary = _header_params(content_type)[1].get("boundary")
+    except ValueError:  # more parameters than any real Content-Type has
         return None
     if not isinstance(boundary, str) or not 0 < len(boundary) <= 200 or not boundary.isascii() \
             or any(c in boundary for c in "\r\n"):
@@ -518,6 +513,156 @@ def _split_part(raw: bytes) -> tuple[bytes, bytes]:
                          f"{_MAX_PART_HEADERS // 1024} KB)", code="J212")
 
 
+# A header field name: printable ASCII except ":", as the email parser accepted.
+_FIELD_NAME = re.compile(rb"[!-9;-~]*")
+# One parameter of a header value: a name, then optionally "=" and a quoted string (a missing
+# closing quote runs to the end of the value) and/or a token. Each alternative is decided by its
+# first character and nothing after it can fail, so the engine never backtracks: a match costs
+# time linear in what it consumes, and a whole value is scanned once.
+_PARAM = re.compile(r'[ \t]*([^;=]*)(?:=[ \t]*(?:"((?:[^"\\]|\\.)*)"?)?([^;]*))?;?', re.S)
+_QUOTED_PAIR = re.compile(r"\\(.)", re.S)
+# RFC 2231: name* (charset'language'percent-encoded) and the continuations name*0, name*1*, ...
+_EXTENDED_NAME = re.compile(r"(\w+)\*(?:([0-9]{1,3})(\*?))?", re.ASCII)
+
+
+def _header_params(value: str, words: tuple = ()) -> tuple[str, dict[str, str]]:
+    """``(main value, {lower-cased name: value})`` of a header such as Content-Disposition.
+
+    Quoted strings are unquoted and RFC 2231/5987 extended values (``filename*=UTF-8''%E2%82%AC``,
+    and continuations) decoded. An extended value wins over a plain one of the same name, as RFC
+    6266 says; of two plain ones the first wins. The quoted values of the parameters named in
+    ``words`` also have RFC 2047 encoded words decoded (some clients send file names that way).
+    The cost is linear in ``len(value)``: one regex scan, and at most ``_MAX_HEADER_PARAMS``
+    steps, past which this raises ValueError.
+    """
+    main, _, rest = value.partition(";")
+    params: dict[str, str] = {}
+    extended: dict[str, list] = {}
+    pos, end, steps = 0, len(rest), 0
+    while pos < end:
+        steps += 1
+        if steps > _MAX_HEADER_PARAMS:
+            raise ValueError("too many header parameters")
+        match = _PARAM.match(rest, pos)
+        pos = match.end()  # always past at least one character: see _PARAM
+        name = match.group(1).strip().lower()
+        if not name:
+            continue
+        quoted, token = match.group(2), match.group(3)
+        text = _QUOTED_PAIR.sub(r"\1", quoted) if quoted is not None else (token or "").strip()
+        section = _EXTENDED_NAME.fullmatch(name)
+        if section:
+            number, star = section.group(2), section.group(3)
+            extended.setdefault(section.group(1), []).append(
+                (-1 if number is None else int(number), text, number is None or star == "*"))
+        elif name not in params:
+            params[name] = _decode_words(text) if quoted is not None and name in words else text
+    for name, pieces in extended.items():
+        params[name] = _extended_value(pieces)
+    return main.strip(), params
+
+
+# RFC 2047 encoded words, =?charset?B?base64?= or =?charset?Q?quoted-printable?=. The parts are
+# runs of characters that exclude the delimiters, so a match never backtracks far: linear.
+_ENCODED_WORD = re.compile(r"=\?([^?\s*]+)(?:\*[^?\s]*)?\?([bBqQ])\?([^?\s]*)\?=")
+_BETWEEN_WORDS = re.compile(r"(\?=)[ \t]+(?==\?)")
+_MAX_ENCODED_WORDS = 16
+
+
+def _decode_words(text: str) -> str:
+    """``text`` with its RFC 2047 encoded words decoded, as the email package did for quoted values.
+
+    Past ``_MAX_ENCODED_WORDS`` words the text is left as it came: that is not a file name."""
+    if "=?" not in text or text.count("=?") > _MAX_ENCODED_WORDS:
+        return text
+    return _ENCODED_WORD.sub(_decode_word, _BETWEEN_WORDS.sub(r"\1", text))  # space between words isn't text
+
+
+def _decode_word(match) -> str:
+    charset, kind, data = match.groups()
+    try:
+        if kind in "bB":
+            raw = base64.b64decode(data + "=" * (-len(data) % 4))
+        else:
+            raw = quopri.decodestring(data.encode("ascii", "replace"), header=True)
+    except (binascii.Error, ValueError):
+        return match.group()
+    return _decode_text(raw, charset)
+
+
+def _extended_value(pieces: list) -> str:
+    """An RFC 2231 value from its ``(section, text, encoded)`` pieces, in section order. Runs of
+    encoded sections are percent-decoded together, then decoded from the charset the first
+    section names (``charset'language'text``; UTF-8 when it names none or an unusable one)."""
+    pieces.sort(key=lambda piece: piece[0])
+    if pieces[0][0] == -1:  # a plain name* is the whole value, whatever sections came with it
+        pieces = pieces[:1]
+    charset, out, run = None, [], []
+    for index, (_, text, encoded) in enumerate(pieces):
+        if not encoded:
+            if run:
+                out.append(_decode_text(b"".join(run), charset or "utf-8"))
+                run = []
+            out.append(text)
+            continue
+        if index == 0 and text.count("'") >= 2:
+            charset, _language, text = text.split("'", 2)
+        run.append(urllib.parse.unquote_to_bytes(text))
+    if run:
+        out.append(_decode_text(b"".join(run), charset or "utf-8"))
+    return "".join(out)
+
+
+def _part_headers(head: bytes) -> dict[str, str]:
+    """One part's header fields by lower-cased name (the first of a repeated name wins).
+
+    Folded continuation lines are unfolded, and a line that isn't ``name: value`` ends the
+    block, as with the email parser. Values are read as UTF-8, which is how browsers send
+    file names.
+    """
+    lines = head.splitlines()
+    if len(lines) > _MAX_PART_HEADER_LINES:
+        raise HTTPError(400, f"Malformed multipart form: a part has more than {_MAX_PART_HEADER_LINES} "
+                             "header lines", code="J212")
+    collected: list[tuple[str, list[bytes]]] = []
+    for line in lines:
+        if line[:1] in (b" ", b"\t"):  # an obsolete folded line continues the field before it
+            if collected:
+                collected[-1][1].append(line)
+            continue
+        key, colon, value = line.partition(b":")
+        if not colon or not _FIELD_NAME.fullmatch(key):
+            break
+        collected.append((key.decode("ascii").lower(), [value.lstrip(b" \t")]))
+    fields: dict[str, str] = {}
+    for key, chunks in collected:
+        if key not in fields:
+            fields[key] = b"".join(chunks).decode("utf-8", "replace")
+    return fields
+
+
+def _part_info(head: bytes) -> tuple[str | None, str | None, str, str | None, str]:
+    """``(name, filename, content type, charset, transfer encoding)`` of one part, from its headers."""
+    fields = _part_headers(head)
+    try:
+        _, disposition = _header_params(fields.get("content-disposition", ""), ("name", "filename"))
+        ctype, type_params = _header_params(fields.get("content-type", ""), ("name",))
+    except ValueError:
+        raise HTTPError(400, "Malformed multipart form: a part's header has more than "
+                             f"{_MAX_HEADER_PARAMS} parameters", code="J212") from None
+    # As email's get_filename(): Content-Disposition's filename, else Content-Type's name.
+    filename = disposition.get("filename", type_params.get("name"))
+    ctype = ctype.lower()
+    charset = type_params.get("charset")
+    return (
+        disposition.get("name"),
+        filename.strip() if filename is not None else None,
+        ctype if ctype.count("/") == 1 else "text/plain",  # RFC 2045: an invalid type reads as text/plain
+        charset.lower() if charset is not None and charset.isascii() else None,
+        fields.get("content-transfer-encoding", "").strip().lower(),
+    )
+
+
 def _transfer_decode(data: bytes, encoding: str) -> bytes:
     """Undo a part's Content-Transfer-Encoding (browsers never send one; RFC 7578 forbids it)."""
     if encoding == "base64":
@@ -532,14 +677,41 @@ def _transfer_decode(data: bytes, encoding: str) -> bytes:
 
 def _decode_text(data: bytes, charset: str | None) -> str:
     """A text field's value, in its declared charset when that is a usable text encoding, else UTF-8."""
-    if charset:
-        try:
-            info = codecs.lookup(charset)
-            if info.name not in _SLOW_CODECS and getattr(info, "_is_text_encoding", True):
-                return data.decode(info.name, "replace")
-        except (LookupError, ValueError, TypeError):  # an unknown or bytes-to-bytes codec
-            pass
-    return data.decode("utf-8", "replace")
+    codec = _text_codec(charset)
+    return data.decode(codec.name if codec is not None else "utf-8", "replace")
+
+
+_CHARSET_NAME = re.compile(r"[A-Za-z0-9._:+-]{1,40}")
+
+
+def _text_codec(charset: str | None):
+    """The codec a client-declared charset names, if it is a usable text encoding, else None.
+
+    Only names the standard library knows reach codecs.lookup(): the encodings package caches
+    every name it fails to find, forever, so looking up whatever names clients send would let
+    requests grow the server's memory without bound.
+    """
+    if not charset or not _CHARSET_NAME.fullmatch(charset):
+        return None
+    name = encodings.normalize_encoding(charset.lower())
+    known = _known_codecs()
+    if name not in known and name.replace(".", "_") not in known:
+        return None
+    try:
+        info = codecs.lookup(charset)
+    except (LookupError, ValueError, TypeError):
+        return None
+    if info.name in _SLOW_CODECS or not getattr(info, "_is_text_encoding", True):
+        return None  # quadratic on crafted input, or a bytes-to-bytes codec such as base64
+    return info
+
+
+@functools.lru_cache(maxsize=1)
+def _known_codecs() -> frozenset:
+    """The codec names (normalised, as the encodings package spells them) the stdlib has."""
+    names = set(encodings.aliases.aliases) | set(encodings.aliases.aliases.values())
+    names.update(module.name for module in pkgutil.iter_modules(encodings.__path__))
+    return frozenset(names)
 
 
 class Response:
